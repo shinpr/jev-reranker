@@ -213,6 +213,12 @@ bodies, request headers, or credentials.
 | `--batch-size <n>` | `30` | Judgments per request, from 1 through 30. Compress judges sentences/lines. |
 | `--timeout-ms <n>` | `10000` | Timeout for each HTTP attempt, in milliseconds. |
 
+## Background
+
+[What Retrieval Still Hasn't Decided](https://www.norsica.jp/blog/what-retrieval-still-hasnt-decided)
+covers why these three modes are separate judgments rather than stages of one pipeline, what each
+one was measured against, and the deduplication mode that is not here.
+
 ## License
 
 [MIT](LICENSE)
