@@ -490,7 +490,13 @@ fn run_cli(
         )
     })?;
     if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(input.as_bytes())?;
+        // A run that rejects its arguments exits before reading stdin, so the pipe
+        // can already be closed by the time this writes.
+        match stdin.write_all(input.as_bytes()) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {}
+            Err(error) => return Err(error),
+        }
     }
     let output = child.wait_with_output()?;
     Ok(ProcessOutput {
