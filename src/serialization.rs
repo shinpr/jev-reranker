@@ -14,9 +14,10 @@ mod tests {
     use serde_json::{json, Map, Value};
 
     use super::serialize_output;
-    use crate::options::{resolve_options, CliOptions, FusionMode};
+    use crate::options::{resolve_options, CliOptions};
     use crate::preparation::{parse_input, prepare_documents};
     use crate::ranking::rank_documents;
+    use clap::Parser;
 
     fn object(value: Value) -> Map<String, Value> {
         let Value::Object(map) = value else {
@@ -60,19 +61,7 @@ mod tests {
         let parsed = parse_input(raw);
         assert!(parsed.is_ok());
         if let Ok(objects) = parsed {
-            let options = resolve_options(CliOptions {
-                query: "q".to_owned(),
-                text_field: "text".to_owned(),
-                context_fields: Vec::new(),
-                score_field: None,
-                score_order: None,
-                fusion: Some(FusionMode::RerankOnly),
-                weight: None,
-                top: None,
-                model: "jev-latest".to_owned(),
-                batch_size: 30,
-                timeout_ms: 10_000,
-            });
+            let options = resolve_options(CliOptions::parse_from(["cli", "--query", "q"]));
             assert!(options.is_ok());
             if let Ok(options) = options {
                 let prepared = prepare_documents(objects, &options);

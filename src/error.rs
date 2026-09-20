@@ -21,13 +21,10 @@ pub enum AppError {
         message: String,
     },
 
-    #[error("invalid rerank score for item {index}: expected a finite number in [0, 1]")]
+    #[error("invalid model score for unit {index}: expected a finite number in [0, 1]")]
     InvalidRerankScore { index: usize },
 
-    #[error("computed score for item {index} is not finite")]
-    NonFiniteComputedScore { index: usize },
-
-    #[error("rerank score count {actual} does not match document count {expected}")]
+    #[error("score count {actual} does not match scoring unit count {expected}")]
     ScoreCountMismatch { expected: usize, actual: usize },
 
     #[error("serialization failed: {source}")]
@@ -81,7 +78,6 @@ impl AppError {
             | Self::Json { .. }
             | Self::InvalidItem { .. }
             | Self::InvalidRerankScore { .. }
-            | Self::NonFiniteComputedScore { .. }
             | Self::ScoreCountMismatch { .. }
             | Self::Serialization { .. }
             | Self::Io { .. }

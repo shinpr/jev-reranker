@@ -7,22 +7,23 @@
 [![CI](https://github.com/shinpr/jev-reranker/actions/workflows/ci.yml/badge.svg)](https://github.com/shinpr/jev-reranker/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/github/license/shinpr/jev-reranker)](LICENSE)
 
-Move the results that answer the query to the top.
+Choose the search results worth passing to your LLM.
 
-A retriever is good at finding plausible candidates, but its first-pass score can still put a
-loosely related result ahead of a direct answer. `jev-reranker` gives those candidates a second
-look with TypeSafe AI's Jev and returns them in best-first order.
+`jev-reranker` uses TypeSafe AI's [Jev](https://docs.typesafe.ai/introduction) to rerank retrieved
+documents, remove candidates that contain no usable evidence, or extract query-specific passages
+for your LLM.
 
-It fits between search and whatever consumes the results:
+It reads a JSON array from stdin and writes a JSON array to stdout. Choose the field that contains
+the text; IDs, source paths, retrieval scores, and other metadata pass through unchanged. Use it
+after BM25, vector search, or any command that emits a JSON array of candidate objects.
 
 ```text
-search or vector database -> JSON candidates -> Jev Reranker -> ranked JSON
+search or vector database -> JSON candidates -> Jev Reranker -> context for your LLM
 ```
 
-The interface is a JSON array, and you choose which fields contain text, context, and an existing
-score. The search backend does not need an integration or a fixed schema.
-
 ## Install
+
+Requires Node.js 14 or later on macOS, Linux, or Windows (x64 or Arm64).
 
 Install the CLI from npm:
 
@@ -36,7 +37,7 @@ You can also run it without a global installation:
 npx -y jev-reranker --help
 ```
 
-Set a TypeSafe API key with access to Jev:
+Create an API key in the [TypeSafe dashboard](https://console.typesafe.ai/), then export it:
 
 ```sh
 export TYPESAFE_API_KEY="your-api-key"
@@ -47,12 +48,12 @@ export TYPESAFE_API_KEY="your-api-key"
 Pipe an array of candidate documents into the CLI:
 
 ```sh
-printf '%s\n' '[{"text":"Access tokens expire after one hour."},{"text":"Build artifacts are cached locally."}]' \
+printf '%s\n' '[{"text":"Build artifacts are cached locally."},{"text":"Access tokens expire after one hour."}]' \
   | jev-reranker --query "How long do access tokens last?"
 ```
 
-The output contains the same objects in best-first order, with a `rerankScore` from 0 to 1 added
-to each one. Higher values mean Jev considers the result more relevant to the query.
+The CLI returns the same objects in best-first order, with a `rerankScore` from 0 to 1 added to
+each one. Higher values mean Jev considers the result more relevant to the query.
 
 ## Bring Your Own Results
 
@@ -78,64 +79,115 @@ search-command --json \
       --query "How long do access tokens last?" \
       --text-field body \
       --context-field title \
-      --score-field distance \
-      --score-order asc \
       --top 5
 ```
 
-`body` is scored as the document text. `title` is prepended as context, which helps short chunks
-that are ambiguous on their own. Because `distance` is lower when a result is better,
-`--score-order asc` keeps that direction when Jev's score is combined with it.
+`body` is the document text. `title` is prepended as context, which helps short chunks that are
+ambiguous on their own. `distance`, `id`, and `source` pass through unchanged. Existing retrieval
+scores do not affect Jev's judgment or the output order.
 
-Fields such as `id` and `source` pass through unchanged. Field names have no built-in meaning;
-the same command works with `content`, `summary`, `similarity`, or any other top-level names.
+## Choose a Mode
 
-## Choose the Ranking Signal
+| Mode | Use it to | Output |
+| --- | --- | --- |
+| `rerank` (default) | Put relevant candidates first. | Original objects sorted by `rerankScore`. |
+| `filter` | Remove candidates that provide no usable evidence. | Retained objects in input order, with `evidenceScore`. |
+| `compress` | Send shorter passages to your LLM. | Retained objects in input order, with `compressedText`. |
 
-With no score options, Jev's relevance probability decides the order:
-
-```sh
-search-command --json \
-  | jev-reranker --query "authentication" --text-field body
-```
-
-When the input already has a useful distance or similarity score, pass `--score-field` and
-`--score-order`. The default `boost` mode combines that score with Jev instead of throwing the
-original signal away.
-
-Use `--score-order asc` for distances where lower is better, and `--score-order desc` for
-similarities where higher is better. `--weight` controls how strongly Jev affects the result.
+These modes run separately. To rank and then filter or compress, pipe one invocation into another
+with the same query. Each invocation makes its own API requests.
 
 <details>
-<summary>Fusion formula</summary>
+<summary>API usage and retries</summary>
 
-```text
-# Lower is better
-fusedScore = score / (1 + rerankScore * weight)
+Rerank and filter make one sequential request per 30 candidates by default. Compression scores
+every sentence or line, so long candidates can require more requests than ranking. Each compression
+batch includes the full text and selected context of the documents it judges. A document with 100
+units sends four copies of that context with `--batch-size 30`; smaller batches can increase the
+total input sent to Jev and its cost. `--top` does not reduce API work or the number of extracted
+units. See [TypeSafe's current Jev pricing](https://typesafe.ai/).
 
-# Higher is better
-fusedScore = score * (1 + rerankScore * weight)
-```
-
-Boost mode adds `fusedScore` and sorts in the selected direction. To ignore the source score
-while leaving it in the output object, use `--fusion rerank-only`.
+`--timeout-ms` applies to each HTTP attempt, not the whole run. HTTP 429 and 529 responses are
+retried up to twice, after waits of 250 ms and 500 ms. Other HTTP errors, timeouts, and transport
+failures are not retried. Total runtime depends on the number of batches and retries.
 
 </details>
 
+### Keep the useful evidence
+
+A result can mention the right topic without providing an answer. Filter mode asks Jev whether
+each candidate contains concrete evidence, including partial answers, conditions, and exceptions.
+
+```sh
+search-command --json \
+  | jev-reranker --query "When can I request a refund?" --mode filter
+```
+
+Candidates with `evidenceScore >= 0.5` survive. Their input order stays intact, so you can keep
+an upstream ranking you already trust. `--top 5` returns the first five survivors; it does not
+sort them by evidence score. If none qualify, the result is `[]`.
+
+### Extract shorter passages
+
+```sh
+search-command --json \
+  | jev-reranker --query "When can I request a refund?" --mode compress
+```
+
+Compress mode splits the selected text into sentences and lines, then asks Jev which units to
+keep. Jev sees the full source text and selected context when judging each unit, with instructions
+to retain relevant conditions, exceptions, and references needed to understand the evidence.
+
+The extracted units appear in `compressedText`, in source order and separated by newlines.
+Their wording is copied from the input, with surrounding whitespace removed. The original text
+and metadata remain available. The example below shows the output shape:
+
+```json
+{
+  "text": "Refunds are available within 30 days. Opened items are excluded. Our offices close at six.",
+  "source": "/docs/refunds.md",
+  "compressedText": "Refunds are available within 30 days.\nOpened items are excluded."
+}
+```
+
+Pass `compressedText` to your downstream LLM to reduce its context. Passing the whole output
+object also sends the original text and saves no space. Documents with no selected units are
+omitted.
+
+Sentence splitting is conservative around initials and abbreviations. It is intended for prose;
+code, tables, and unusual formatting may work better with whole-document `filter` mode. Selected
+context fields help Jev interpret the text but are not copied into `compressedText`.
+
+### Adjust how much to keep
+
+Both `filter` and `compress` accept `--threshold`, from 0 to 1, with a default of `0.5`.
+Lower values keep more material; higher values discard more. In compress mode the threshold
+applies to each sentence or line. Treat `0.5` as a starting point and tune it on your own data.
+
 ## JSON Contract
 
-Stdin must contain one JSON array. Every array item must be an object with a string in the field
-selected by `--text-field`, which defaults to `text`.
+Stdin must contain one JSON array. Each item must be an object, and the field selected by
+`--text-field` must be a string. The field defaults to `text`.
 
-The CLI preserves unrecognized fields and writes `rerankScore` to every result. Boost mode also
-writes `fusedScore`. Existing values under those output field names are replaced. Equal ranking
-scores retain their input order, and `--top` is applied after sorting.
+The CLI preserves the original fields and writes the selected mode's output field: `rerankScore`,
+`evidenceScore`, or `compressedText`.
+
+<details>
+<summary>Full JSON contract</summary>
+
+Existing values under the selected mode's output field are replaced. Other modes' output fields
+pass through unchanged. Text and context fields cannot use the current mode's output field name.
+
+Equal rerank scores retain their input order. Filter and compress preserve input order throughout.
+`--top` limits output objects after the selected mode has processed all candidates.
 
 You may repeat `--context-field`. Present string values are prepended in flag order, while missing
-and `null` values are skipped. In boost mode, every object must contain a finite number in the
-selected score field.
+and `null` values are skipped. Other context value types are rejected.
 
-An empty array returns `[]` without reading the API key or making a request.
+An empty array returns `[]` without reading the API key or making a request. Compress also returns
+`[]` without a request when every selected text is empty or contains only whitespace.
+
+</details>
 
 ## What Leaves Your Machine
 
@@ -154,13 +206,11 @@ bodies, request headers, or credentials.
 | `--query <string>` | Required | Query used to judge relevance. |
 | `--text-field <name>` | `text` | Object field containing the text to score. |
 | `--context-field <name>` | None | Context field to prepend. May be repeated. |
-| `--score-field <name>` | None | Existing numeric score to combine with Jev. |
-| `--score-order <asc\|desc>` | None | Whether lower or higher source scores are better. Required with `--score-field`. |
-| `--fusion <boost\|rerank-only>` | Automatic | Uses `boost` with a score field and `rerank-only` without one. |
-| `--weight <number>` | `1.0` | Strength of the Jev boost. Valid only in boost mode. |
-| `--top <n>` | All results | Number of results to keep after ranking. |
+| `--mode <rerank\|filter\|compress>` | `rerank` | How to select or order context. |
+| `--threshold <number>` | `0.5` | Minimum score to keep a document or unit. Filter and compress only. |
+| `--top <n>` | All results | Maximum output objects, at least 1. |
 | `--model <name>` | `jev-latest` | Jev model route. |
-| `--batch-size <n>` | `30` | Documents sent per request, from 1 through 30. |
+| `--batch-size <n>` | `30` | Judgments per request, from 1 through 30. Compress judges sentences/lines. |
 | `--timeout-ms <n>` | `10000` | Timeout for each HTTP attempt, in milliseconds. |
 
 ## License

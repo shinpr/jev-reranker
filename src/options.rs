@@ -3,15 +3,10 @@ use clap::{Parser, ValueEnum};
 use crate::error::AppError;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
-pub enum ScoreOrder {
-    Asc,
-    Desc,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
-pub enum FusionMode {
-    Boost,
-    RerankOnly,
+pub enum Mode {
+    Rerank,
+    Filter,
+    Compress,
 }
 
 #[derive(Clone, Debug, Parser, PartialEq)]
@@ -26,17 +21,13 @@ pub struct CliOptions {
     #[arg(long = "context-field")]
     pub context_fields: Vec<String>,
 
-    #[arg(long)]
-    pub score_field: Option<String>,
+    /// Select ranking, evidence filtering, or extractive compression.
+    #[arg(long, default_value = "rerank")]
+    pub mode: Mode,
 
+    /// Minimum evidence probability for filter/compress (default: 0.5).
     #[arg(long)]
-    pub score_order: Option<ScoreOrder>,
-
-    #[arg(long)]
-    pub fusion: Option<FusionMode>,
-
-    #[arg(long)]
-    pub weight: Option<f64>,
+    pub threshold: Option<f64>,
 
     #[arg(long)]
     pub top: Option<usize>,
@@ -47,6 +38,7 @@ pub struct CliOptions {
     #[arg(long, default_value_t = 30)]
     pub batch_size: usize,
 
+    /// Timeout for each HTTP attempt in milliseconds, not the whole run.
     #[arg(long, default_value_t = 10_000)]
     pub timeout_ms: u64,
 }
@@ -56,10 +48,8 @@ pub struct ResolvedOptions {
     pub query: String,
     pub text_field: String,
     pub context_fields: Vec<String>,
-    pub score_field: Option<String>,
-    pub score_order: Option<ScoreOrder>,
-    pub fusion: FusionMode,
-    pub weight: f64,
+    pub mode: Mode,
+    pub threshold: f64,
     pub top: Option<usize>,
     pub model: String,
     pub batch_size: usize,
@@ -74,38 +64,23 @@ pub fn resolve_options(raw: CliOptions) -> Result<ResolvedOptions, AppError> {
     for field in &raw.context_fields {
         validate_name("context-field", field)?;
     }
-    if let Some(field) = &raw.score_field {
-        validate_name("score-field", field)?;
+    validate_name("model", &raw.model)?;
+    let threshold = raw.threshold.unwrap_or(0.5);
+    if !threshold.is_finite() || !(0.0..=1.0).contains(&threshold) {
+        return Err(usage("threshold", "must be finite and between 0 and 1"));
     }
-    if raw.model.is_empty() {
-        return Err(usage("model", "must not be empty"));
+    if raw.mode == Mode::Rerank && raw.threshold.is_some() {
+        return Err(usage("threshold", "requires --mode filter or compress"));
     }
-
-    match (&raw.score_field, raw.score_order) {
-        (Some(_), None) => return Err(usage("score-order", "is required with --score-field")),
-        (None, Some(_)) => return Err(usage("score-order", "requires --score-field")),
-        _ => {}
-    }
-
-    let fusion = raw.fusion.unwrap_or(match raw.score_field {
-        Some(_) => FusionMode::Boost,
-        None => FusionMode::RerankOnly,
-    });
-    if fusion == FusionMode::Boost && raw.score_field.is_none() {
+    let output_field = match raw.mode {
+        Mode::Rerank => "rerankScore",
+        Mode::Filter => "evidenceScore",
+        Mode::Compress => "compressedText",
+    };
+    if raw.text_field == output_field || raw.context_fields.iter().any(|f| f == output_field) {
         return Err(usage(
-            "fusion",
-            "boost requires --score-field and --score-order",
-        ));
-    }
-
-    let weight = raw.weight.unwrap_or(1.0);
-    if !weight.is_finite() || weight < 0.0 {
-        return Err(usage("weight", "must be finite and at least zero"));
-    }
-    if fusion == FusionMode::RerankOnly && raw.weight.is_some() {
-        return Err(usage(
-            "weight",
-            "cannot be supplied with --fusion rerank-only",
+            "text-field/context-field",
+            "must not use this mode's output field",
         ));
     }
 
@@ -123,10 +98,8 @@ pub fn resolve_options(raw: CliOptions) -> Result<ResolvedOptions, AppError> {
         query: raw.query,
         text_field: raw.text_field,
         context_fields: raw.context_fields,
-        score_field: raw.score_field,
-        score_order: raw.score_order,
-        fusion,
-        weight,
+        mode: raw.mode,
+        threshold,
         top: raw.top,
         model: raw.model,
         batch_size: raw.batch_size,
@@ -150,94 +123,38 @@ fn usage(option: &str, message: &str) -> AppError {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_options, CliOptions, FusionMode, ScoreOrder};
-
-    fn base() -> CliOptions {
-        CliOptions {
-            query: "query".to_owned(),
-            text_field: "text".to_owned(),
-            context_fields: Vec::new(),
-            score_field: None,
-            score_order: None,
-            fusion: None,
-            weight: None,
-            top: None,
-            model: "jev-latest".to_owned(),
-            batch_size: 30,
-            timeout_ms: 10_000,
-        }
-    }
+    use super::*;
 
     #[test]
-    fn resolves_rerank_only_defaults_without_score_options() {
-        let resolved = resolve_options(base());
-        assert!(resolved.is_ok());
-        if let Ok(options) = resolved {
-            assert_eq!(options.fusion, FusionMode::RerankOnly);
-            assert!((options.weight - 1.0).abs() < f64::EPSILON);
-            assert_eq!(options.batch_size, 30);
-            assert_eq!(options.timeout_ms, 10_000);
+    fn validates_mode_specific_options_and_bounds() {
+        for args in [
+            vec!["cli", "--query", "q", "--threshold", "0.5"],
+            vec![
+                "cli",
+                "--query",
+                "q",
+                "--mode",
+                "filter",
+                "--threshold",
+                "NaN",
+            ],
+            vec![
+                "cli",
+                "--query",
+                "q",
+                "--mode",
+                "compress",
+                "--threshold",
+                "1.1",
+            ],
+            vec!["cli", "--query", "q", "--top", "0"],
+            vec!["cli", "--query", "q", "--batch-size", "31"],
+            vec!["cli", "--query", "q", "--timeout-ms", "0"],
+            vec!["cli", "--query", "q", "--text-field", "rerankScore"],
+        ] {
+            assert!(resolve_options(CliOptions::try_parse_from(args).unwrap()).is_err());
         }
-    }
-
-    #[test]
-    fn resolves_boost_defaults_when_score_options_are_present() {
-        let mut input = base();
-        input.score_field = Some("score".to_owned());
-        input.score_order = Some(ScoreOrder::Asc);
-        let resolved = resolve_options(input);
-        assert!(resolved.is_ok());
-        if let Ok(options) = resolved {
-            assert_eq!(options.fusion, FusionMode::Boost);
-            assert_eq!(options.score_order, Some(ScoreOrder::Asc));
-        }
-    }
-
-    #[test]
-    fn rejects_relationships_and_bounds_with_usage_errors() {
-        let mut missing_order = base();
-        missing_order.score_field = Some("score".to_owned());
-        let missing_order_error = resolve_options(missing_order);
-        assert!(matches!(
-            missing_order_error,
-            Err(crate::error::AppError::Usage { .. })
-        ));
-
-        let mut zero_top = base();
-        zero_top.top = Some(0);
-        let zero_top_error = resolve_options(zero_top);
-        assert!(matches!(
-            zero_top_error,
-            Err(crate::error::AppError::Usage { .. })
-        ));
-
-        let mut explicit_weight = base();
-        explicit_weight.weight = Some(2.0);
-        let explicit_weight_error = resolve_options(explicit_weight);
-        assert!(matches!(
-            explicit_weight_error,
-            Err(crate::error::AppError::Usage { .. })
-        ));
-
-        let mut invalid_batch = base();
-        invalid_batch.batch_size = 31;
-        let invalid_batch_error = resolve_options(invalid_batch);
-        assert!(matches!(
-            invalid_batch_error,
-            Err(crate::error::AppError::Usage { .. })
-        ));
-    }
-
-    #[test]
-    fn accepts_explicit_rerank_only_with_score_options_but_ignores_source_score() {
-        let mut input = base();
-        input.score_field = Some("score".to_owned());
-        input.score_order = Some(ScoreOrder::Desc);
-        input.fusion = Some(FusionMode::RerankOnly);
-        let resolved = resolve_options(input);
-        assert!(resolved.is_ok());
-        if let Ok(options) = resolved {
-            assert_eq!(options.fusion, FusionMode::RerankOnly);
-        }
+        let options = resolve_options(CliOptions::parse_from(["cli", "--query", "q"])).unwrap();
+        assert_eq!(options.mode, Mode::Rerank);
     }
 }

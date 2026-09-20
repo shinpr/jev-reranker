@@ -11,6 +11,7 @@
     )
 )]
 
+mod compression;
 mod error;
 mod http;
 mod options;
