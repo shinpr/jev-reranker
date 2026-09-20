@@ -3,7 +3,27 @@ name = "jev-reranker"
 version = "0.1.0"
 edition = "2021"
 publish = false
+description = "Rerank JSON search results with TypeSafe AI's Jev"
+repository = "https://github.com/shinpr/jev-reranker"
+homepage = "https://github.com/shinpr/jev-reranker"
+readme = "README.md"
 license = "MIT"
+keywords = ["search", "reranking", "cli", "jev", "json"]
+categories = ["command-line-utilities"]
+
+[package.metadata.npm]
+name = "jev-reranker"
+prefix = "@shinpr/jev-reranker-"
+bins = ["jev-reranker"]
+targets = [
+  "aarch64-apple-darwin",
+  "x86_64-apple-darwin",
+  "aarch64-unknown-linux-musl",
+  "x86_64-unknown-linux-musl",
+  "aarch64-pc-windows-msvc",
+  "x86_64-pc-windows-msvc",
+]
+custom = { publishConfig = { access = "public" } }
 
 [dependencies]
 clap = { version = "4.6.1", features = ["derive"] }

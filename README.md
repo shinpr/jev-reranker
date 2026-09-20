@@ -1,82 +1,168 @@
-# jev-reranker
+<p align="center">
+  <img src="https://raw.githubusercontent.com/shinpr/jev-reranker/main/assets/banner.jpg" alt="Many candidate stones narrowing to one highlighted result" width="600" />
+</p>
 
-`jev-reranker` is a standalone synchronous Rust CLI for applying Jev reranking to a JSON
-array of retrieval results. It reads generic object maps from stdin, sends the configured
-documents to TypeSafe System One, correlates the Noul answers, and writes the ranked objects to
-stdout.
+# Jev Reranker
 
-This repository is an offline-first MVP. The checked-in tests use a loopback HTTP stub; a live
-TypeSafe request is needed only when an operator deliberately performs compatibility verification.
+[![CI](https://github.com/shinpr/jev-reranker/actions/workflows/ci.yml/badge.svg)](https://github.com/shinpr/jev-reranker/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/github/license/shinpr/jev-reranker)](LICENSE)
 
-## Build
+Move the results that answer the query to the top.
 
-The repository pins Rust `1.98.1` in `rust-toolchain.toml`.
+A retriever is good at finding plausible candidates, but its first-pass score can still put a
+loosely related result ahead of a direct answer. `jev-reranker` gives those candidates a second
+look with TypeSafe AI's Jev and returns them in best-first order.
 
-```sh
-cargo build --release
+It fits between search and whatever consumes the results:
+
+```text
+search or vector database -> JSON candidates -> Jev Reranker -> ranked JSON
 ```
 
-## Use
+The interface is a JSON array, and you choose which fields contain text, context, and an existing
+score. The search backend does not need an integration or a fixed schema.
 
-For non-empty input, make `TYPESAFE_API_KEY` available in the process environment. Keep its value
-out of command lines, source files, CI configuration, and logs; the CLI does not accept a key
-flag. For example, an environment manager or shell startup configuration may export the variable
-before invoking the binary:
+## Install
 
-```sh
-export TYPESAFE_API_KEY
-```
-
-Pipe one JSON array of objects to the release binary:
+Install the CLI from npm:
 
 ```sh
-printf '%s\n' '[{"text":"A short document"}]' \
-  | target/release/jev-reranker --query 'find relevant documents'
+npm install --global jev-reranker
 ```
 
-The production request is sent to the fixed `https://api.typesafe.ai/v1/systemone` endpoint. HTTP
-requests are blocking and batches are processed sequentially. Only HTTP 429 and 529 responses
-are retried, with at most two retries per batch.
+You can also run it without a global installation:
+
+```sh
+npx -y jev-reranker --help
+```
+
+Set a TypeSafe API key with access to Jev:
+
+```sh
+export TYPESAFE_API_KEY="your-api-key"
+```
+
+## Try It
+
+Pipe an array of candidate documents into the CLI:
+
+```sh
+printf '%s\n' '[{"text":"Access tokens expire after one hour."},{"text":"Build artifacts are cached locally."}]' \
+  | jev-reranker --query "How long do access tokens last?"
+```
+
+The output contains the same objects in best-first order, with a `rerankScore` from 0 to 1 added
+to each one. Higher values mean Jev considers the result more relevant to the query.
+
+## Bring Your Own Results
+
+Suppose a search command returns objects shaped like this:
+
+```json
+[
+  {
+    "id": "auth-guide",
+    "title": "Authentication",
+    "body": "Access tokens expire after one hour.",
+    "distance": 0.18,
+    "source": "/docs/auth.md"
+  }
+]
+```
+
+Tell `jev-reranker` which fields to use:
+
+```sh
+search-command --json \
+  | jev-reranker \
+      --query "How long do access tokens last?" \
+      --text-field body \
+      --context-field title \
+      --score-field distance \
+      --score-order asc \
+      --top 5
+```
+
+`body` is scored as the document text. `title` is prepended as context, which helps short chunks
+that are ambiguous on their own. Because `distance` is lower when a result is better,
+`--score-order asc` keeps that direction when Jev's score is combined with it.
+
+Fields such as `id` and `source` pass through unchanged. Field names have no built-in meaning;
+the same command works with `content`, `summary`, `similarity`, or any other top-level names.
+
+## Choose the Ranking Signal
+
+With no score options, Jev's relevance probability decides the order:
+
+```sh
+search-command --json \
+  | jev-reranker --query "authentication" --text-field body
+```
+
+When the input already has a useful distance or similarity score, pass `--score-field` and
+`--score-order`. The default `boost` mode combines that score with Jev instead of throwing the
+original signal away.
+
+Use `--score-order asc` for distances where lower is better, and `--score-order desc` for
+similarities where higher is better. `--weight` controls how strongly Jev affects the result.
+
+<details>
+<summary>Fusion formula</summary>
+
+```text
+# Lower is better
+fusedScore = score / (1 + rerankScore * weight)
+
+# Higher is better
+fusedScore = score * (1 + rerankScore * weight)
+```
+
+Boost mode adds `fusedScore` and sorts in the selected direction. To ignore the source score
+while leaving it in the output object, use `--fusion rerank-only`.
+
+</details>
+
+## JSON Contract
+
+Stdin must contain one JSON array. Every array item must be an object with a string in the field
+selected by `--text-field`, which defaults to `text`.
+
+The CLI preserves unrecognized fields and writes `rerankScore` to every result. Boost mode also
+writes `fusedScore`. Existing values under those output field names are replaced. Equal ranking
+scores retain their input order, and `--top` is applied after sorting.
+
+You may repeat `--context-field`. Present string values are prepended in flag order, while missing
+and `null` values are skipped. In boost mode, every object must contain a finite number in the
+selected score field.
+
+An empty array returns `[]` without reading the API key or making a request.
+
+## What Leaves Your Machine
+
+The query, model name, selected context values, and selected text are sent directly to TypeSafe's
+System One API. Other object fields, including the source score, stay local. The API key is read
+only from `TYPESAFE_API_KEY`; there is no command-line key option.
+
+Results are buffered until every batch succeeds, so a failed request leaves stdout empty instead
+of producing a partial JSON document. Error messages do not include document text, response
+bodies, request headers, or credentials.
 
 ## Options
 
-| Option | Default and contract |
-| --- | --- |
-| `--query <string>` | Required and non-empty. Whitespace is preserved. |
-| `--text-field <name>` | `text`; every input object needs a string at this key. |
-| `--context-field <name>` | Repeatable; present string values are prepended in flag order, separated by two newlines. Missing or `null` values are skipped. |
-| `--score-field <name>` | Omitted by default. Required with `--score-order` for `boost`; each value must be a finite JSON number. |
-| `--score-order <asc\|desc>` | Required with `--score-field`. Determines boost fusion and ordering. |
-| `--fusion <boost\|rerank-only>` | Defaults to `boost` when `--score-field` is supplied, otherwise `rerank-only`. `boost` requires both score options. |
-| `--weight <number>` | `1.0`; finite and at least zero. An explicit weight is rejected in `rerank-only`. |
-| `--top <n>` | All results; when present, `n` must be at least 1 and is applied after sorting. |
-| `--model <name>` | `jev-latest`; non-empty and sent verbatim. |
-| `--batch-size <n>` | `30`; an integer from 1 through 30. Larger inputs are split into sequential batches. |
-| `--timeout-ms <n>` | `10000`; a positive unsigned millisecond duration applied to each HTTP attempt. |
+| Option | Default | Description |
+| --- | --- | --- |
+| `--query <string>` | Required | Query used to judge relevance. |
+| `--text-field <name>` | `text` | Object field containing the text to score. |
+| `--context-field <name>` | None | Context field to prepend. May be repeated. |
+| `--score-field <name>` | None | Existing numeric score to combine with Jev. |
+| `--score-order <asc\|desc>` | None | Whether lower or higher source scores are better. Required with `--score-field`. |
+| `--fusion <boost\|rerank-only>` | Automatic | Uses `boost` with a score field and `rerank-only` without one. |
+| `--weight <number>` | `1.0` | Strength of the Jev boost. Valid only in boost mode. |
+| `--top <n>` | All results | Number of results to keep after ranking. |
+| `--model <name>` | `jev-latest` | Jev model route. |
+| `--batch-size <n>` | `30` | Documents sent per request, from 1 through 30. |
+| `--timeout-ms <n>` | `10000` | Timeout for each HTTP attempt, in milliseconds. |
 
-In `rerank-only`, results are ordered by descending `rerankScore`. In `boost`, ascending scores
-use `score / (1 + rerankScore * weight)` and descending scores use
-`score * (1 + rerankScore * weight)`; results are ordered in the selected score direction.
-Finite negative source scores are valid.
+## License
 
-## Input, output, and errors
-
-Stdin must contain one syntactically valid JSON array, and every element must be an object. Input
-properties—including unknown properties and arbitrary-precision integer values—are preserved in
-JSON meaning. A successful invocation exits 0 and writes one compact, newline-terminated JSON
-array. Every result contains `rerankScore`; `boost` results also contain `fusedScore`. Equal
-ranking keys retain input order.
-
-An empty array produces `[]\n` without looking up the credential or making an HTTP request.
-Configuration relationships are still validated first. Usage/argument errors exit 2; input,
-credential, HTTP, response, and serialization errors exit 1. Failures write only a safe summary to
-stderr and leave stdout empty; request bodies, document text, response bodies, headers, and
-credential values are not rendered.
-
-## Standalone MVP boundary
-
-The MVP covers this one binary, generic JSON passthrough, direct blocking TypeSafe calls, bounded
-sequential batching, reranking/fusion, and reproducible offline quality checks. It does not include
-retrieval-quality experiments or claims, npm or other distribution packaging, deployment, MCP
-integration, changes to the retriever, thresholding, RRF, neighbour expansion, or an
-application-owned asynchronous/concurrent execution model.
+[MIT](LICENSE)
