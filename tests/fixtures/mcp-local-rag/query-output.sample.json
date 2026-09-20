@@ -1,0 +1,31 @@
+[
+  {
+    "filePath": "/tmp/jev-reranker/guide.md",
+    "chunkIndex": 0,
+    "text": "Alpha body",
+    "score": 2.0,
+    "fileTitle": null,
+    "images": [
+      {
+        "imageIndex": 0,
+        "mimeType": "image/png",
+        "data": "aW1hZ2UtMA=="
+      }
+    ],
+    "futureProperty": {
+      "enabled": true,
+      "labels": ["future", "unknown"]
+    },
+    "hugeInteger": 18446744073709551617
+  },
+  {
+    "filePath": "/tmp/jev-reranker/reference.md",
+    "chunkIndex": 1,
+    "text": "Beta body",
+    "score": 1.0,
+    "fileTitle": "Reference",
+    "images": [],
+    "futureProperty": null,
+    "hugeInteger": -9223372036854775809
+  }
+]
