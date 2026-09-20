@@ -983,3 +983,61 @@ fn whitespace_only_compression_needs_no_api_call() -> Result<(), Box<dyn Error>>
     assert_eq!(output.stdout, b"[]\n");
     Ok(())
 }
+
+#[test]
+fn compress_uses_language_rules_and_preserves_source() -> Result<(), Box<dyn Error>> {
+    for (language, kept, omitted) in [
+        (
+            "es",
+            "La Dra. García aprobó el pago.",
+            "Se requiere autorización.",
+        ),
+        ("pt", "A Sra. Silva chegou.", "Ela espera."),
+        ("de", "Das gilt ggf. auch morgen.", "Weiter."),
+        (
+            "fr",
+            "Le paiement est approuvé.",
+            "Une autorisation est nécessaire.",
+        ),
+        ("zh", "保存三十天。", "特殊情况除外。"),
+        ("ja", "保存は30日です。", "例外があります。"),
+        ("ar", "هل تم الحفظ؟", "نعم، تم الحفظ."),
+        ("hi", "डेटा सुरक्षित है।", "अगला चरण शुरू करें।"),
+    ] {
+        let source = format!("{kept} {omitted}");
+        let server = start_observing_responses(vec![response(
+            200,
+            &valid_answers(&[("document-0-unit-0", 0.9), ("document-0-unit-1", 0.1)]),
+        )])?;
+        let output = run_cli(
+            &["--query", "q", "--mode", "compress", "--language", language],
+            &json!([{"text":source,"id":language}]).to_string(),
+            Some(&server.endpoint),
+            Some(DUMMY_KEY),
+        )?;
+        assert_success(&output);
+        let requests = server.shutdown_and_finish()?;
+        let result: Value = serde_json::from_slice(&output.stdout)?;
+        assert_eq!(result[0]["text"], source);
+        assert_eq!(result[0]["id"], language);
+        assert_eq!(result[0]["compressedText"], kept);
+        let body = parse_body(&requests[0])?;
+        assert_eq!(body["state"]["documents"][0]["units"][0]["text"], kept);
+        assert_eq!(body["state"]["documents"][0]["units"][1]["text"], omitted);
+    }
+    Ok(())
+}
+
+#[test]
+fn language_is_only_accepted_for_compression() -> Result<(), Box<dyn Error>> {
+    for args in [
+        vec!["--query", "q", "--language", "es"],
+        vec!["--query", "q", "--mode", "filter", "--language", "es"],
+        vec!["--query", "q", "--mode", "compress", "--language", ""],
+    ] {
+        let output = run_cli(&args, "[]", None, None)?;
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+    }
+    Ok(())
+}

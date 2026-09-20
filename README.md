@@ -154,7 +154,13 @@ Pass `compressedText` to your downstream LLM to reduce its context. Passing the 
 object also sends the original text and saves no space. Documents with no selected units are
 omitted.
 
-Sentence splitting is conservative around initials and abbreviations. It is intended for prose;
+Sentence splitting uses [sentencex](https://github.com/wikimedia/sentencex), with English rules
+by default. Use `--language es` for Spanish, `de` for German, `pt` for Portuguese, `fr` for French,
+or another sentencex language code. The option applies to all documents in a compress invocation;
+it does not detect languages or change Jev's model. Unrecognized codes use sentencex's fallback
+rules (ultimately English). Mixed-language documents use the chosen rules throughout.
+Abbreviations can still be split incorrectly; this is not a guarantee of equal accuracy across
+languages. Sentence/line extraction is intended for prose;
 code, tables, and unusual formatting may work better with whole-document `filter` mode. Selected
 context fields help Jev interpret the text but are not copied into `compressedText`.
 
@@ -207,6 +213,7 @@ bodies, request headers, or credentials.
 | `--text-field <name>` | `text` | Object field containing the text to score. |
 | `--context-field <name>` | None | Context field to prepend. May be repeated. |
 | `--mode <rerank\|filter\|compress>` | `rerank` | How to select or order context. |
+| `--language <code>` | `en` | Sentence-splitting language. Compress only; no auto-detection. |
 | `--threshold <number>` | `0.5` | Minimum score to keep a document or unit. Filter and compress only. |
 | `--top <n>` | All results | Maximum output objects, at least 1. |
 | `--model <name>` | `jev-latest` | Jev model route. |
