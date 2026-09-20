@@ -52,6 +52,7 @@ pub fn score_documents(
     let endpoint = endpoint()?;
     let api_key = api_key()?;
     let client = Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_millis(options.timeout_ms))
         .build()
         .map_err(|_| AppError::HttpClient)?;
@@ -81,7 +82,7 @@ fn endpoint() -> Result<String, AppError> {
     if let Some(value) = env::var_os(TEST_ENDPOINT_VARIABLE) {
         let value = value.to_str().ok_or(AppError::InvalidTestEndpoint)?;
         let mut url = reqwest::Url::parse(value).map_err(|_| AppError::InvalidTestEndpoint)?;
-        let loopback = matches!(url.host_str(), Some("127.0.0.1" | "::1"));
+        let loopback = url.host_str() == Some("127.0.0.1");
         if url.scheme() != "http"
             || !loopback
             || url.username() != ""

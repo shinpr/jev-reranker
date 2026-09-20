@@ -79,7 +79,7 @@ const FIXTURE: &str = include_str!("fixtures/mcp-local-rag/query-output.sample.j
 const REORDERED_FIXTURE_RESPONSE: &str = r#"{"model":"jev-test","answers":{"document-1":{"type":"noul","noul":0.8},"document-0":{"type":"noul","noul":0.2}},"usage":{"input_tokens":1,"output_tokens":1}}"#;
 
 // Provenance: exact bytes copied from
-// https://raw.githubusercontent.com/shinpr/mcp-local-rag/589f00f71a18a61ac3b2c97dcf2edf14611dc87/docs/schema/query-output.schema.json
+// https://raw.githubusercontent.com/shinpr/mcp-local-rag/589f00f71a18a61ac3b2c97dcf2edf14611dcf87/docs/schema/query-output.schema.json
 
 #[derive(Debug)]
 struct ProcessOutput {
@@ -100,6 +100,7 @@ struct ResponseScript {
     status: u16,
     body: String,
     delay: Duration,
+    location: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -151,6 +152,10 @@ fn start_stub(responses: Vec<ResponseScript>) -> io::Result<StubServer> {
 
 fn start_observing_stub() -> io::Result<StubServer> {
     start_stub_with_options(Vec::new(), false, Some(ObservationMode::Close))
+}
+
+fn start_observing_responses(responses: Vec<ResponseScript>) -> io::Result<StubServer> {
+    start_stub_with_options(responses, false, Some(ObservationMode::Close))
 }
 
 fn start_observing_sequential_stub(responses: Vec<ResponseScript>) -> io::Result<StubServer> {
@@ -216,6 +221,7 @@ fn serve_stub(
                         status: 503,
                         body: "{}".to_owned(),
                         delay: Duration::ZERO,
+                        location: None,
                     },
                 );
                 let _ = write_response(&mut stream, &response);
@@ -402,11 +408,18 @@ fn write_response(stream: &mut TcpStream, response: &ResponseScript) -> io::Resu
         _ => "Error",
     };
     let body = response.body.as_bytes();
+    let location_header = response
+        .location
+        .as_deref()
+        .map_or(String::new(), |location| {
+            format!("Location: {location}\r\n")
+        });
     write!(
         stream,
-        "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {} {}\r\n{}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         response.status,
         reason,
+        location_header,
         body.len()
     )?;
     stream.write_all(body)
@@ -417,6 +430,7 @@ fn response(status: u16, body: &Value) -> ResponseScript {
         status,
         body: body.to_string(),
         delay: Duration::ZERO,
+        location: None,
     }
 }
 
@@ -425,6 +439,16 @@ fn raw_response(status: u16, body: &str) -> ResponseScript {
         status,
         body: body.to_owned(),
         delay: Duration::ZERO,
+        location: None,
+    }
+}
+
+fn redirect_response(location: &str) -> ResponseScript {
+    ResponseScript {
+        status: 307,
+        body: "{\"secret\":\"redirect-response-body\"}".to_owned(),
+        delay: Duration::ZERO,
+        location: Some(location.to_owned()),
     }
 }
 
@@ -619,6 +643,38 @@ fn contract_fixture_crosses_the_process_and_http_boundaries() -> Result<(), Box<
     let request = requests.first().ok_or("request was not captured")?;
     assert_fixture_request(request)?;
     assert_fixture_output(&output.stdout)?;
+    Ok(())
+}
+
+#[test]
+fn redirect_is_not_followed_and_keeps_sensitive_content_out_of_errors() -> Result<(), Box<dyn Error>>
+{
+    let server = start_observing_responses(vec![redirect_response("/redirected")])?;
+    let output = run_cli(
+        &["--query", "redirect query", "--fusion", "rerank-only"],
+        r#"[{"text":"redirect document"}]"#,
+        Some(&server.endpoint),
+        Some(DUMMY_KEY),
+    )?;
+    let requests = server.shutdown_and_finish()?;
+    assert_eq!(requests.len(), 1);
+    let request = requests.first().ok_or("request was not captured")?;
+    assert_eq!(request.request_line, "POST /v1/systemone HTTP/1.1");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("307"));
+    for secret in [
+        DUMMY_KEY,
+        "redirect query",
+        "redirect document",
+        "redirect-response-body",
+    ] {
+        assert!(
+            !stderr.contains(secret),
+            "stderr leaked {secret:?}: {stderr}"
+        );
+    }
     Ok(())
 }
 

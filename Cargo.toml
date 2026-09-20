@@ -5,12 +5,6 @@ edition = "2021"
 publish = false
 license = "MIT"
 
-[package.metadata.cargo-machete]
-# These direct dependencies are pinned for the next task's blocking HTTP and wire-model
-# implementation; keeping them now preserves the approved crate contract without adding
-# Task 02 behavior to this pure slice.
-ignored = ["reqwest", "serde"]
-
 [dependencies]
 clap = { version = "4.6.1", features = ["derive"] }
 reqwest = { version = "0.12.24", default-features = false, features = ["blocking", "json", "rustls-tls"] }
