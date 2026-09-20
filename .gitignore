@@ -7,6 +7,7 @@
 /tmp/
 
 # Local agent/tool state
+/.agents/
 /.claude/
 /AGENTS.md
 /CLAUDE.md
