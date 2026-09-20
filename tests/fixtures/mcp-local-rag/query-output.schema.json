@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/shinpr/mcp-local-rag/blob/main/docs/schema/query-output.schema.json",
+  "title": "mcp-local-rag query output",
+  "description": "Stdout payload of `mcp-local-rag query`. Results are ordered best-first, so the array order is the ranking. Consumers must preserve properties they do not recognize: new optional properties may be added without a major version bump.",
+  "type": "array",
+  "items": { "$ref": "#/$defs/queryResult" },
+  "$defs": {
+    "queryResult": {
+      "type": "object",
+      "required": ["filePath", "chunkIndex", "text", "score", "fileTitle", "images"],
+      "properties": {
+        "filePath": {
+          "type": "string",
+          "description": "Absolute path of the source file the chunk came from. Separator is OS-native, so it is backslash-separated on Windows."
+        },
+        "chunkIndex": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Zero-based index of the chunk within its file. With `filePath` it identifies the chunk, and the pair is what `read-neighbors` takes."
+        },
+        "text": {
+          "type": "string",
+          "description": "Chunk text."
+        },
+        "score": {
+          "type": "number",
+          "description": "Relevance distance, so a lower value is a better match. Magnitudes are comparable only within a single response."
+        },
+        "fileTitle": {
+          "type": ["string", "null"],
+          "description": "Title of the source document when one could be derived, otherwise null."
+        },
+        "images": {
+          "type": "array",
+          "description": "Visual attachments stored with the chunk, in visual order. Empty unless the document was ingested with image storage enabled. Attachments that failed validation are omitted and reported on stderr, so this array may be shorter than what was stored.",
+          "items": { "$ref": "#/$defs/visualAttachment" }
+        },
+        "source": {
+          "type": "string",
+          "description": "Original source identifier of content ingested through `ingest_data`, for example the URL an HTML page was fetched from. Present only for chunks whose `filePath` points into the managed raw-data area."
+        }
+      }
+    },
+    "visualAttachment": {
+      "type": "object",
+      "required": ["imageIndex", "mimeType", "data"],
+      "properties": {
+        "imageIndex": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Zero-based position of the image within its chunk."
+        },
+        "mimeType": {
+          "type": "string",
+          "enum": ["image/png", "image/jpeg"],
+          "description": "Media type of `data`."
+        },
+        "data": {
+          "type": "string",
+          "contentEncoding": "base64",
+          "description": "Base64-encoded image bytes. Bounded per attachment, so a large source image may have been omitted rather than truncated."
+        }
+      }
+    }
+  }
+}

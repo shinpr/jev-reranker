@@ -12,6 +12,7 @@
 )]
 
 mod error;
+mod http;
 mod options;
 mod preparation;
 mod ranking;
@@ -22,6 +23,7 @@ use std::io::{self, Read, Write};
 use clap::Parser;
 
 use crate::error::AppError;
+use crate::http::score_documents;
 use crate::options::{resolve_options, CliOptions};
 use crate::preparation::{parse_input, prepare_documents};
 use crate::ranking::rank_documents;
@@ -51,11 +53,7 @@ fn run(cli: CliOptions) -> Result<Vec<u8>, AppError> {
         .map_err(|source| AppError::Io { source })?;
     let objects = parse_input(&input)?;
     let prepared = prepare_documents(objects, &options)?;
-    if !prepared.is_empty() {
-        return Err(AppError::Runtime {
-            message: "network scoring is not part of the pure preparation slice".to_owned(),
-        });
-    }
-    let ranked = rank_documents(prepared, &[], &options)?;
+    let scores = score_documents(&prepared, &options)?;
+    let ranked = rank_documents(prepared, &scores, &options)?;
     serialize_output(&ranked)
 }
