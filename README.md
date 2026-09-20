@@ -154,13 +154,11 @@ Pass `compressedText` to your downstream LLM to reduce its context. Passing the 
 object also sends the original text and saves no space. Documents with no selected units are
 omitted.
 
-Sentence splitting uses [sentencex](https://github.com/wikimedia/sentencex), with English rules
-by default. Use `--language es` for Spanish, `de` for German, `pt` for Portuguese, `fr` for French,
-or another sentencex language code. The option applies to all documents in a compress invocation;
-it does not detect languages or change Jev's model. Unrecognized codes use sentencex's fallback
-rules (ultimately English). Mixed-language documents use the chosen rules throughout.
-Abbreviations can still be split incorrectly; this is not a guarantee of equal accuracy across
-languages. Sentence/line extraction is intended for prose;
+For non-English text, set the language to improve sentence splitting, for example
+`--language es` for Spanish or `--language pt` for Portuguese. English is the default;
+the setting applies to all documents in the invocation.
+
+Sentence/line extraction is intended for prose;
 code, tables, and unusual formatting may work better with whole-document `filter` mode. Selected
 context fields help Jev interpret the text but are not copied into `compressedText`.
 
