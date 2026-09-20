@@ -49,7 +49,7 @@ if [ -z "${npm_otp}" ]; then
   exit 1
 fi
 
-NPM_CONFIG_OTP="${npm_otp}" npx --offline --yes cargo-npm@0.1.4 npm publish \
+NPM_CONFIG_OTP="${npm_otp}" npx --yes cargo-npm@0.1.4 npm publish \
   --out-dir "${package_directory}" \
   -- \
   --access public \
