@@ -158,12 +158,6 @@ Sentence/line extraction is intended for prose. For code, tables, and unusual fo
 whole-document `filter` mode may work better. Selected context fields help Jev interpret the text
 but are not copied into `compressedText`.
 
-### Adjust how much to keep
-
-Both `filter` and `compress` accept `--threshold`, from 0 to 1, with a default of `0.5`.
-Lower values keep more material; higher values discard more. In compress mode the threshold
-applies to each sentence or line. Treat `0.5` as a starting point and tune it on your own data.
-
 ## JSON Contract
 
 Stdin must contain one JSON array. Each item must be an object, and the field selected by
@@ -207,11 +201,22 @@ bodies, request headers, or credentials.
 | `--text-field <name>` | `text` | Object field containing the text to score. |
 | `--context-field <name>` | None | Context field to prepend. May be repeated. |
 | `--mode <rerank\|filter\|compress>` | `rerank` | How to select or order context. |
-| `--threshold <number>` | `0.5` | Minimum score to keep a document or unit. Filter and compress only. |
 | `--top <n>` | All results | Maximum output objects, at least 1. |
+
+<details>
+<summary>Tuning options</summary>
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `--threshold <number>` | `0.5` | Minimum score to keep a document or unit. Filter and compress only. |
 | `--model <name>` | `jev-latest` | Jev model route. |
 | `--batch-size <n>` | `30` | Judgments per request, from 1 through 30. Compress judges sentences/lines. |
 | `--timeout-ms <n>` | `10000` | Timeout for each HTTP attempt, in milliseconds. |
+
+`--threshold` accepts values from 0 to 1. Lower values keep more material; higher values discard
+more. It applies to documents in filter mode and individual units in compress mode.
+
+</details>
 
 ## Background
 
