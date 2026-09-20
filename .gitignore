@@ -1,0 +1,16 @@
+# Build output
+/target/
+/bin/
+*.exe
+
+# Local working area
+/tmp/
+
+# Local agent/tool state
+/.claude/
+/AGENTS.md
+/CLAUDE.md
+/docs/
+
+# OS/editor noise
+.DS_Store
