@@ -1,64 +1,55 @@
-/// Extract verbatim sentence/line units using sentencex's language rules.
-pub fn split_units(text: &str, language: &str) -> Vec<String> {
-    text.lines()
-        .flat_map(|line| sentencex::segment(language, line))
-        .map(str::trim)
-        .filter(|unit| !unit.is_empty())
-        .map(str::to_owned)
-        .collect()
+use unicode_segmentation::UnicodeSegmentation;
+
+/// Preserve source text between Unicode sentence boundaries. Whitespace-only
+/// segments belong to the preceding unit and do not require a separate judgment.
+pub fn split_units(text: &str) -> Vec<String> {
+    let mut units: Vec<String> = Vec::new();
+    for part in text.trim().split_sentence_bounds() {
+        if part.trim().is_empty() {
+            if let Some(previous) = units.last_mut() {
+                previous.push_str(part);
+            }
+        } else {
+            units.push(part.to_owned());
+        }
+    }
+    units
 }
 
 #[cfg(test)]
 mod tests {
-    use super::split_units as split_with_language;
-
-    fn split_units(text: &str) -> Vec<String> {
-        split_with_language(text, "en")
-    }
+    use super::split_units;
 
     #[test]
-    fn keeps_initials_decimals_and_abbreviations_with_their_sentence() {
-        assert_eq!(
-            split_units(
-                "Silas B. Cobb paid $1.5 million. Dr. Smith agreed.\n次の文。条件付きです！"
-            ),
-            [
-                "Silas B. Cobb paid $1.5 million.",
-                "Dr. Smith agreed.",
-                "次の文。",
-                "条件付きです！"
-            ]
-        );
-        assert_eq!(
-            split_units("Use U.S. settings, e.g. for v1.2.3. Next."),
-            ["Use U.S. settings, e.g. for v1.2.3.", "Next."]
-        );
-        assert_eq!(
-            split_units("「保存は30日です。」次の文。"),
-            ["「保存は30日です。」", "次の文。"]
-        );
-        assert_eq!(
-            split_units("She said \"Approved.\" Next sentence."),
-            ["She said \"Approved.\"", "Next sentence."]
-        );
+    fn preserves_source_text_across_boundaries_and_scripts() {
+        for text in [
+            "  Silas B. Cobb paid $1.5 million. Dr. Smith agreed.  ",
+            "Mme. Dupont met la Dra. García. 保存は30日です。",
+            "Heading\r\n\r\nFirst sentence.\nSecond sentence.",
+            "هل تم الحفظ؟ نعم، تم الحفظ.",
+            "डेटा सुरक्षित है। अगला चरण शुरू करें।",
+            "Cafe\u{301}. 👨‍👩‍👧‍👦! 次の文。",
+            "「保存は30日です。」次の文。",
+        ] {
+            let units = split_units(text);
+            assert_eq!(units.concat(), text.trim());
+            assert!(units.iter().all(|unit| !unit.trim().is_empty()));
+        }
         assert!(split_units(" \r\n ").is_empty());
     }
 
     #[test]
-    fn preserves_lines_unicode_and_unknown_language_input() {
-        let text = "Heading\r\nDr. Smith agreed.\n保存は30日です。例外があります。";
-        assert_eq!(split_with_language(text, "unknown"), split_units(text));
-        assert_eq!(
-            split_units(text),
-            [
-                "Heading",
-                "Dr. Smith agreed.",
-                "保存は30日です。",
-                "例外があります。"
-            ]
-        );
-        let long_line = "word ".repeat(3_000);
-        let units = split_units(&long_line);
-        assert_eq!(units.join(" "), long_line.trim());
+    fn recognizes_sentence_terminators_without_language_selection() {
+        for (text, expected) in [
+            ("First. Second.", vec!["First. ", "Second."]),
+            (
+                "保存三十天。特殊情况除外。",
+                vec!["保存三十天。", "特殊情况除外。"],
+            ),
+            ("هل تم الحفظ؟ نعم.", vec!["هل تم الحفظ؟ ", "نعم."]),
+            ("डेटा सुरक्षित है। आगे बढ़ें।", vec!["डेटा सुरक्षित है। ", "आगे बढ़ें।"]),
+        ] {
+            assert_eq!(split_units(text), expected);
+        }
     }
 }

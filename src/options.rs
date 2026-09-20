@@ -25,10 +25,6 @@ pub struct CliOptions {
     #[arg(long, default_value = "rerank")]
     pub mode: Mode,
 
-    /// Sentence-splitting language code for compress (default: en). No auto-detection.
-    #[arg(long)]
-    pub language: Option<String>,
-
     /// Minimum evidence probability for filter/compress (default: 0.5).
     #[arg(long)]
     pub threshold: Option<f64>,
@@ -54,7 +50,6 @@ pub struct ResolvedOptions {
     pub context_fields: Vec<String>,
     pub mode: Mode,
     pub threshold: f64,
-    pub language: String,
     pub top: Option<usize>,
     pub model: String,
     pub batch_size: usize,
@@ -70,16 +65,6 @@ pub fn resolve_options(raw: CliOptions) -> Result<ResolvedOptions, AppError> {
         validate_name("context-field", field)?;
     }
     validate_name("model", &raw.model)?;
-    if let Some(language) = &raw.language {
-        validate_name("language", language)?;
-        if raw.mode != Mode::Compress {
-            return Err(usage("language", "requires --mode compress"));
-        }
-    }
-    let language = raw
-        .language
-        .unwrap_or_else(|| "en".to_owned())
-        .to_ascii_lowercase();
     let threshold = raw.threshold.unwrap_or(0.5);
     if !threshold.is_finite() || !(0.0..=1.0).contains(&threshold) {
         return Err(usage("threshold", "must be finite and between 0 and 1"));
@@ -115,7 +100,6 @@ pub fn resolve_options(raw: CliOptions) -> Result<ResolvedOptions, AppError> {
         context_fields: raw.context_fields,
         mode: raw.mode,
         threshold,
-        language,
         top: raw.top,
         model: raw.model,
         batch_size: raw.batch_size,

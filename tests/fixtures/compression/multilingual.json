@@ -1,0 +1,62 @@
+[
+  {
+    "id": "en",
+    "text": "Silas B. Cobb approved the payment. Written authorization is required. The office walls are blue.",
+    "units": 4,
+    "expected": "Silas B. Cobb approved the payment. Written authorization is required."
+  },
+  {
+    "id": "es",
+    "text": "La Dra. María J. García aprobó el pago. Se requiere autorización escrita. Las paredes de la oficina son azules.",
+    "units": 5,
+    "expected": "La Dra. María J. García aprobó el pago. Se requiere autorización escrita."
+  },
+  {
+    "id": "pt",
+    "text": "A Sra. Maria J. Silva aprovou o pagamento. É necessária autorização por escrito. As paredes do escritório são azuis.",
+    "units": 5,
+    "expected": "A Sra. Maria J. Silva aprovou o pagamento. É necessária autorização por escrito."
+  },
+  {
+    "id": "de",
+    "text": "Dr. Anna Müller hat die Zahlung genehmigt. Eine schriftliche Genehmigung ist ggf. auch morgen erforderlich. Die Bürowände sind blau.",
+    "units": 4,
+    "expected": "Dr. Anna Müller hat die Zahlung genehmigt. Eine schriftliche Genehmigung ist ggf. auch morgen erforderlich."
+  },
+  {
+    "id": "fr",
+    "text": "Mme. Marie Dupont a approuvé le paiement. Une autorisation écrite est nécessaire. Les murs du bureau sont bleus.",
+    "units": 4,
+    "expected": "Mme. Marie Dupont a approuvé le paiement. Une autorisation écrite est nécessaire."
+  },
+  {
+    "id": "zh",
+    "text": "王明批准了付款。付款前必须获得书面授权。办公室的墙是蓝色的。",
+    "units": 3,
+    "expected": "王明批准了付款。付款前必须获得书面授权。"
+  },
+  {
+    "id": "ja",
+    "text": "山田太郎が支払いを承認しました。支払いには書面の許可が必要です。事務所の壁は青色です。",
+    "units": 3,
+    "expected": "山田太郎が支払いを承認しました。支払いには書面の許可が必要です。"
+  },
+  {
+    "id": "ar",
+    "text": "وافق أحمد علي على الدفع. يلزم الحصول على إذن كتابي. جدران المكتب زرقاء.",
+    "units": 3,
+    "expected": "وافق أحمد علي على الدفع. يلزم الحصول على إذن كتابي."
+  },
+  {
+    "id": "hi",
+    "text": "राज शर्मा ने भुगतान को मंजूरी दी। लिखित अनुमति आवश्यक है। कार्यालय की दीवारें नीली हैं।",
+    "units": 3,
+    "expected": "राज शर्मा ने भुगतान को मंजूरी दी। लिखित अनुमति आवश्यक है।"
+  },
+  {
+    "id": "mixed",
+    "text": "La Dra. María J. García approved the payment. 支払いには書面の許可が必要です。Les murs du bureau sont bleus.",
+    "units": 5,
+    "expected": "La Dra. María J. García approved the payment. 支払いには書面の許可が必要です。"
+  }
+]

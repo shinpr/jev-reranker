@@ -138,15 +138,15 @@ Compress mode splits the selected text into sentences and lines, then asks Jev w
 keep. Jev sees the full source text and selected context when judging each unit, with instructions
 to retain relevant conditions, exceptions, and references needed to understand the evidence.
 
-The extracted units appear in `compressedText`, in source order and separated by newlines.
-Their wording is copied from the input, with surrounding whitespace removed. The original text
-and metadata remain available. The example below shows the output shape:
+`compressedText` contains retained passages in source order, with surrounding whitespace removed.
+Adjacent retained text stays together; nonadjacent passages are separated by newlines.
+The original text and metadata remain available. The example below shows the output shape:
 
 ```json
 {
   "text": "Refunds are available within 30 days. Opened items are excluded. Our offices close at six.",
   "source": "/docs/refunds.md",
-  "compressedText": "Refunds are available within 30 days.\nOpened items are excluded."
+  "compressedText": "Refunds are available within 30 days. Opened items are excluded."
 }
 ```
 
@@ -154,13 +154,9 @@ Pass `compressedText` to your downstream LLM to reduce its context. Passing the 
 object also sends the original text and saves no space. Documents with no selected units are
 omitted.
 
-For non-English text, set the language to improve sentence splitting, for example
-`--language es` for Spanish or `--language pt` for Portuguese. English is the default;
-the setting applies to all documents in the invocation.
-
-Sentence/line extraction is intended for prose;
-code, tables, and unusual formatting may work better with whole-document `filter` mode. Selected
-context fields help Jev interpret the text but are not copied into `compressedText`.
+Sentence/line extraction is intended for prose. For code, tables, and unusual formatting,
+whole-document `filter` mode may work better. Selected context fields help Jev interpret the text
+but are not copied into `compressedText`.
 
 ### Adjust how much to keep
 
@@ -211,7 +207,6 @@ bodies, request headers, or credentials.
 | `--text-field <name>` | `text` | Object field containing the text to score. |
 | `--context-field <name>` | None | Context field to prepend. May be repeated. |
 | `--mode <rerank\|filter\|compress>` | `rerank` | How to select or order context. |
-| `--language <code>` | `en` | Sentence-splitting language. Compress only; no auto-detection. |
 | `--threshold <number>` | `0.5` | Minimum score to keep a document or unit. Filter and compress only. |
 | `--top <n>` | All results | Maximum output objects, at least 1. |
 | `--model <name>` | `jev-latest` | Jev model route. |

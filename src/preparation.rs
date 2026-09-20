@@ -80,7 +80,7 @@ pub fn prepare_documents(
         let prepared_text = text_parts.join("\n\n");
 
         let units = if options.mode == Mode::Compress {
-            crate::compression::split_units(&text, &options.language)
+            crate::compression::split_units(&text)
         } else {
             Vec::new()
         };

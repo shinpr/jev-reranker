@@ -6,9 +6,6 @@ multiple-versions = "deny"
 wildcards = "deny"
 highlight = "all"
 skip = [
-  # sentencex 0.1.30 -> strum_macros 0.28 requires syn 2, while the existing
-  # derive stack requires syn 3. This duplicate is a build-time proc-macro dependency.
-  { name = "syn", version = "2.0.119" },
   # reqwest's rustls ring stack and clap's current terminal stack require
   # incompatible windows-sys major versions.
   { name = "windows-sys", version = "0.52.0" },
