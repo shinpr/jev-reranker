@@ -882,8 +882,9 @@ fn compress_extracts_verbatim_units_with_full_context_across_batches() -> Result
         ),
         response(
             200,
-            &valid_answers(&[("document-0-unit-2", 0.1), ("document-1-unit-0", 0.2)]),
+            &valid_answers(&[("document-0-unit-2", 0.5), ("document-0-unit-3", 0.1)]),
         ),
+        response(200, &valid_answers(&[("document-1-unit-0", 0.2)])),
     ])?;
     let input = json!([
         {"body": source, "title":"Funding", "source":"manual", "compressedText":"stale", "huge":18_446_744_073_709_551_617_i128},
@@ -916,9 +917,10 @@ fn compress_extracts_verbatim_units_with_full_context_across_batches() -> Result
     assert_eq!(result[0]["huge"].to_string(), "18446744073709551617");
     assert_eq!(
         result[0]["compressedText"],
-        "Silas B. Cobb paid $1.5 million.\nPayment requires approval."
+        "Silas B. Cobb paid $1.5 million. Payment requires approval."
     );
-    for request in &requests {
+    assert_eq!(requests.len(), 3);
+    for request in requests.iter().take(2) {
         let body = parse_body(request)?;
         assert_eq!(
             body["state"]["documents"][0]["text"],
@@ -929,7 +931,7 @@ fn compress_extracts_verbatim_units_with_full_context_across_batches() -> Result
     let body = parse_body(&requests[0])?;
     assert_eq!(
         body["state"]["documents"][0]["units"][0]["text"],
-        "Silas B. Cobb paid $1.5 million."
+        "Silas B. "
     );
     let instructions = body["questions"]["document-0-unit-0"]["instructions"]
         .as_str()
@@ -964,7 +966,13 @@ fn all_modes_accept_empty_input_and_retired_options_are_rejected() -> Result<(),
         assert_success(&output);
         assert_eq!(output.stdout, b"[]\n");
     }
-    for option in ["--fusion", "--score-field", "--score-order", "--weight"] {
+    for option in [
+        "--fusion",
+        "--score-field",
+        "--score-order",
+        "--weight",
+        "--language",
+    ] {
         let output = run_cli(&["--query", "q", option, "old"], "[]", None, None)?;
         assert_eq!(output.status.code(), Some(2));
     }
@@ -981,5 +989,54 @@ fn whitespace_only_compression_needs_no_api_call() -> Result<(), Box<dyn Error>>
     )?;
     assert_success(&output);
     assert_eq!(output.stdout, b"[]\n");
+    Ok(())
+}
+
+#[test]
+fn compress_handles_multilingual_text_without_configuration() -> Result<(), Box<dyn Error>> {
+    let cases: Vec<Value> =
+        serde_json::from_str(include_str!("fixtures/compression/multilingual.json"))?;
+    // All languages travel through the same invocation, without a language hint.
+    let mut ordered = Vec::new();
+    for (index, case) in cases.iter().enumerate() {
+        let count = case["units"].as_u64().ok_or("unit count")?;
+        for unit in 0..count {
+            ordered.push((
+                format!("document-{index}-unit-{unit}"),
+                json!({
+                    "type":"noul", "noul":if unit + 1 == count {0.1} else {0.9}
+                }),
+            ));
+        }
+    }
+    let responses = ordered
+        .chunks(30)
+        .map(|chunk| {
+            let answers: serde_json::Map<_, _> = chunk.iter().cloned().collect();
+            response(200, &json!({"answers":answers}))
+        })
+        .collect();
+    let server = start_observing_responses(responses)?;
+    let output = run_cli(
+        &[
+            "--query",
+            "Who approved the payment and what condition applies?",
+            "--mode",
+            "compress",
+        ],
+        &serde_json::to_string(&cases)?,
+        Some(&server.endpoint),
+        Some(DUMMY_KEY),
+    )?;
+    assert_success(&output);
+    let requests = server.shutdown_and_finish()?;
+    assert_eq!(requests.len(), 2);
+    let result: Vec<Value> = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(result.len(), cases.len());
+    for (actual, case) in result.iter().zip(&cases) {
+        assert_eq!(actual["compressedText"], case["expected"]);
+        assert_eq!(actual["text"], case["text"]);
+        assert_eq!(actual["id"], case["id"]);
+    }
     Ok(())
 }

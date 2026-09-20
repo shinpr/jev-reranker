@@ -1,60 +1,19 @@
-/// Conservative sentence/line boundaries. Ambiguous periods stay with their context.
-/// Returned units are verbatim source substrings, with surrounding whitespace removed.
+use unicode_segmentation::UnicodeSegmentation;
+
+/// Preserve source text between Unicode sentence boundaries. Whitespace-only
+/// segments belong to the preceding unit and do not require a separate judgment.
 pub fn split_units(text: &str) -> Vec<String> {
-    let mut units = Vec::new();
-    let mut start = 0;
-    let mut chars = text.char_indices().peekable();
-    while let Some((index, ch)) = chars.next() {
-        let mut end = index + ch.len_utf8();
-        let before = text.get(start..end).unwrap_or_default();
-        let after = text
-            .get(end..)
-            .unwrap_or_default()
-            .trim_start_matches(is_closer);
-        let boundary = match ch {
-            '\n' | '。' | '！' | '？' => true,
-            '!' | '?' => after.starts_with(char::is_whitespace) || after.is_empty(),
-            '.' => period_ends_sentence(before, after),
-            _ => false,
-        };
-        if boundary {
-            while chars.peek().is_some_and(|(_, next)| is_closer(*next)) {
-                if let Some((offset, closer)) = chars.next() {
-                    end = offset + closer.len_utf8();
-                }
+    let mut units: Vec<String> = Vec::new();
+    for part in text.trim().split_sentence_bounds() {
+        if part.trim().is_empty() {
+            if let Some(previous) = units.last_mut() {
+                previous.push_str(part);
             }
-            push_unit(&mut units, text.get(start..end).unwrap_or_default());
-            start = end;
+        } else {
+            units.push(part.to_owned());
         }
     }
-    push_unit(&mut units, text.get(start..).unwrap_or_default());
     units
-}
-
-fn is_closer(ch: char) -> bool {
-    matches!(ch, '\"' | '\'' | '”' | '’' | '」' | '』' | ')' | '）' | ']')
-}
-
-fn push_unit(units: &mut Vec<String>, text: &str) {
-    if !text.trim().is_empty() {
-        units.push(text.trim().to_owned());
-    }
-}
-
-fn period_ends_sentence(before: &str, after: &str) -> bool {
-    if !after.is_empty() && !after.starts_with(char::is_whitespace) {
-        return false;
-    }
-    let word = before.split_whitespace().last().unwrap_or_default();
-    let stem = word.trim_end_matches('.');
-    // Initials, dotted abbreviations, and common titles are ambiguous: do not split.
-    if stem.chars().count() == 1 || stem.contains('.') {
-        return false;
-    }
-    !matches!(
-        stem.to_ascii_lowercase().as_str(),
-        "mr" | "mrs" | "ms" | "dr" | "prof" | "sr" | "jr" | "st" | "vs" | "etc" | "fig" | "no"
-    )
 }
 
 #[cfg(test)]
@@ -62,30 +21,35 @@ mod tests {
     use super::split_units;
 
     #[test]
-    fn keeps_initials_decimals_and_abbreviations_with_their_sentence() {
-        assert_eq!(
-            split_units(
-                "Silas B. Cobb paid $1.5 million. Dr. Smith agreed.\n次の文。条件付きです！"
-            ),
-            [
-                "Silas B. Cobb paid $1.5 million.",
-                "Dr. Smith agreed.",
-                "次の文。",
-                "条件付きです！"
-            ]
-        );
-        assert_eq!(
-            split_units("Use U.S. settings, e.g. for v1.2.3. Next."),
-            ["Use U.S. settings, e.g. for v1.2.3. Next."]
-        );
-        assert_eq!(
-            split_units("「保存は30日です。」次の文。"),
-            ["「保存は30日です。」", "次の文。"]
-        );
-        assert_eq!(
-            split_units("She said \"Approved.\" Next sentence."),
-            ["She said \"Approved.\"", "Next sentence."]
-        );
+    fn preserves_source_text_across_boundaries_and_scripts() {
+        for text in [
+            "  Silas B. Cobb paid $1.5 million. Dr. Smith agreed.  ",
+            "Mme. Dupont met la Dra. García. 保存は30日です。",
+            "Heading\r\n\r\nFirst sentence.\nSecond sentence.",
+            "هل تم الحفظ؟ نعم، تم الحفظ.",
+            "डेटा सुरक्षित है। अगला चरण शुरू करें।",
+            "Cafe\u{301}. 👨‍👩‍👧‍👦! 次の文。",
+            "「保存は30日です。」次の文。",
+        ] {
+            let units = split_units(text);
+            assert_eq!(units.concat(), text.trim());
+            assert!(units.iter().all(|unit| !unit.trim().is_empty()));
+        }
         assert!(split_units(" \r\n ").is_empty());
+    }
+
+    #[test]
+    fn recognizes_sentence_terminators_without_language_selection() {
+        for (text, expected) in [
+            ("First. Second.", vec!["First. ", "Second."]),
+            (
+                "保存三十天。特殊情况除外。",
+                vec!["保存三十天。", "特殊情况除外。"],
+            ),
+            ("هل تم الحفظ؟ نعم.", vec!["هل تم الحفظ؟ ", "نعم."]),
+            ("डेटा सुरक्षित है। आगे बढ़ें।", vec!["डेटा सुरक्षित है। ", "आगे बढ़ें।"]),
+        ] {
+            assert_eq!(split_units(text), expected);
+        }
     }
 }

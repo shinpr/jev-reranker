@@ -85,18 +85,28 @@ fn compress(
     let mut results = Vec::new();
     let mut remaining = scores.iter().copied();
     for document in documents {
-        let selected = document
+        let mut passages = Vec::new();
+        let mut passage = String::new();
+        for (unit, score) in document
             .units
             .iter()
             .zip(remaining.by_ref().take(document.units.len()))
-            .filter(|(_, score)| *score >= threshold)
-            .map(|(text, _)| text.as_str())
-            .collect::<Vec<_>>();
-        if !selected.is_empty() {
+        {
+            if score >= threshold {
+                passage.push_str(unit);
+            } else if !passage.is_empty() {
+                passages.push(passage.trim().to_owned());
+                passage.clear();
+            }
+        }
+        if !passage.is_empty() {
+            passages.push(passage.trim().to_owned());
+        }
+        if !passages.is_empty() {
             let mut object = document.object;
             object.insert(
                 "compressedText".to_owned(),
-                Value::String(selected.join("\n")),
+                Value::String(passages.join("\n")),
             );
             results.push(object);
         }
@@ -153,6 +163,25 @@ mod tests {
                 .unwrap()
                 .is_empty());
         }
+    }
+
+    #[test]
+    fn compression_joins_adjacent_fragments_but_separates_removed_passages() {
+        let options = resolve_options(CliOptions::parse_from([
+            "cli", "--query", "q", "--mode", "compress",
+        ]))
+        .unwrap();
+        let docs = prepare_documents(
+            parse_input(r#"[{"text":"Silas B. Cobb paid. Unrelated text. Approval required."}]"#)
+                .unwrap(),
+            &options,
+        )
+        .unwrap();
+        let result = rank_documents(docs, &[0.9, 0.9, 0.1, 0.9], &options).unwrap();
+        assert_eq!(
+            result[0]["compressedText"],
+            "Silas B. Cobb paid.\nApproval required."
+        );
     }
 
     #[test]
