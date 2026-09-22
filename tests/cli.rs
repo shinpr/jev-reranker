@@ -28,26 +28,26 @@
 //     service, real credential, schema-validator dependency, or network fetch is permitted.
 //
 // Case: later_batch_retry_exhaustion_is_bounded_and_output_atomic
-// AC: AC-004 and AC-005 — requests for input larger than --batch-size are sequential; 429/529
-//     responses receive at most two retries; an exhausted later batch exits 1 with useful,
-//     credential-safe stderr and no stdout payload.
+// AC: AC-004 and AC-005 — input larger than --batch-size is split into batches that may be
+//     sent concurrently; 429/529 responses receive at most two retries per batch; an exhausted
+//     later batch exits 1 with useful, credential-safe stderr and no stdout payload.
 // Behavior: pipe a multi-item array into the debug binary with --batch-size 1 -> let the
-//     loopback stub complete the first batch, then script retryable failures for the second
-//     batch -> observe ordered request attempts followed by process failure with all earlier
-//     results withheld.
+//     loopback stub answer each batch by its question IDs, completing the first batch and
+//     scripting retryable failures for the second -> observe bounded attempts for the second
+//     batch followed by process failure with all earlier results withheld.
 // @lane: service-integration-e2e
 // @dependency: compiled debug jev-reranker binary; stdin/stdout/stderr process pipes;
-//     JEV_RERANKER_TEST_ENDPOINT; literal-loopback std::net::TcpListener stub with an ordered
-//     response script and request-attempt recording
+//     JEV_RERANKER_TEST_ENDPOINT; literal-loopback std::net::TcpListener stub that routes
+//     scripted responses by question IDs and records request attempts
 // @real-dependency: operating-system child-process pipes; application batching/correlation and
 //     output buffering; reqwest blocking HTTP client and loopback TCP
 // Primary failure mode: focused retry or ranking tests remain green while real process/network
-//     orchestration overlaps batches, retries too many times or after the wrong statuses,
+//     orchestration mixes up batch answers, retries too many times or after the wrong statuses,
 //     releases partial JSON after a later-batch failure, or leaks credentials/request contents
 //     through stderr.
-// Proof obligation: use a fixed dummy key and deterministic two-batch input; assert the second
-//     request is not accepted until the first response completes; script the second batch as
-//     429, then 529, then 529 and assert exactly three ordered attempts with the same document
+// Proof obligation: use a fixed dummy key and deterministic two-batch input; route responses by
+//     question IDs so arrival order does not matter; script the second batch as
+//     429, then 529, then 529 and assert exactly three attempts with the same document
 //     ID and body; assert exit 1, byte-empty stdout, and stderr that identifies the failed batch
 //     and exhausted retryable status while containing neither the dummy bearer value nor query,
 //     prepared document text, request body, or server response body. Control only the input,
@@ -63,14 +63,14 @@
     )
 )]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::error::Error;
 use std::io::{self, ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::{json, Value};
 
@@ -117,7 +117,6 @@ struct StubServer {
 }
 
 struct StubOptions {
-    detect_early_request: bool,
     observation: Option<ObservationMode>,
     shutdown_receiver: Option<Receiver<()>>,
 }
@@ -147,28 +146,23 @@ impl StubServer {
 }
 
 fn start_stub(responses: Vec<ResponseScript>) -> io::Result<StubServer> {
-    start_stub_with_options(responses, false, None)
+    start_stub_with_options(responses, None)
 }
 
 fn start_observing_stub() -> io::Result<StubServer> {
-    start_stub_with_options(Vec::new(), false, Some(ObservationMode::Close))
+    start_stub_with_options(Vec::new(), Some(ObservationMode::Close))
 }
 
 fn start_observing_responses(responses: Vec<ResponseScript>) -> io::Result<StubServer> {
-    start_stub_with_options(responses, false, Some(ObservationMode::Close))
-}
-
-fn start_observing_sequential_stub(responses: Vec<ResponseScript>) -> io::Result<StubServer> {
-    start_stub_with_options(responses, true, Some(ObservationMode::Close))
+    start_stub_with_options(responses, Some(ObservationMode::Close))
 }
 
 fn start_holding_stub() -> io::Result<StubServer> {
-    start_stub_with_options(Vec::new(), false, Some(ObservationMode::Hold))
+    start_stub_with_options(Vec::new(), Some(ObservationMode::Hold))
 }
 
 fn start_stub_with_options(
     responses: Vec<ResponseScript>,
-    detect_early_request: bool,
     observation: Option<ObservationMode>,
 ) -> io::Result<StubServer> {
     let listener = TcpListener::bind(("127.0.0.1", 0))?;
@@ -183,7 +177,6 @@ fn start_stub_with_options(
         };
     let handle = thread::spawn(move || {
         let options = StubOptions {
-            detect_early_request,
             observation,
             shutdown_receiver,
         };
@@ -198,6 +191,165 @@ fn start_stub_with_options(
     })
 }
 
+// Concurrent batches arrive in any order, so responses are matched by question IDs.
+fn start_routing_stub(routes: Vec<(Vec<String>, Vec<ResponseScript>)>) -> io::Result<StubServer> {
+    let listener = TcpListener::bind(("127.0.0.1", 0))?;
+    let endpoint = format!("http://{}/v1/systemone", listener.local_addr()?);
+    let (sender, receiver) = mpsc::channel();
+    let (shutdown_sender, shutdown_receiver) = mpsc::channel();
+    let routes = routes
+        .into_iter()
+        .map(|(mut ids, scripts)| {
+            ids.sort();
+            (ids, VecDeque::from(scripts))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let handle = thread::spawn(move || {
+        let result = serve_routes(&listener, routes, &shutdown_receiver);
+        let _ = sender.send(result);
+    });
+    Ok(StubServer {
+        endpoint,
+        receiver,
+        handle,
+        shutdown_sender: Some(shutdown_sender),
+    })
+}
+
+fn serve_routes(
+    listener: &TcpListener,
+    mut routes: BTreeMap<Vec<String>, VecDeque<ResponseScript>>,
+    shutdown_receiver: &Receiver<()>,
+) -> Result<Vec<RequestRecord>, String> {
+    listener
+        .set_nonblocking(true)
+        .map_err(|error| error.to_string())?;
+    let mut requests = Vec::new();
+    let mut shutting_down = false;
+    loop {
+        if !shutting_down && !matches!(shutdown_receiver.try_recv(), Err(TryRecvError::Empty)) {
+            shutting_down = true;
+        }
+        let (mut stream, _) = match listener.accept() {
+            Ok(connection) => connection,
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                if shutting_down {
+                    return Ok(requests);
+                }
+                thread::sleep(Duration::from_millis(2));
+                continue;
+            }
+            Err(error) => return Err(error.to_string()),
+        };
+        stream
+            .set_nonblocking(false)
+            .map_err(|error| error.to_string())?;
+        let request = read_request(&mut stream)?;
+        let body: Value =
+            serde_json::from_slice(&request.body).map_err(|error| error.to_string())?;
+        let ids = body["questions"]
+            .as_object()
+            .map(|questions| questions.keys().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        requests.push(request);
+        let Some(script) = routes.get_mut(&ids).and_then(VecDeque::pop_front) else {
+            let _ = write_response(&mut stream, &raw_response(500, "{}"));
+            return Err(format!("no scripted response for question IDs {ids:?}"));
+        };
+        let _ = write_response(&mut stream, &script);
+    }
+}
+
+// Holds every connection unanswered until all expected requests arrive, so a client that waits
+// for one response before sending the next request fails this stub.
+fn start_overlap_stub(routes: Vec<(Vec<String>, ResponseScript)>) -> io::Result<StubServer> {
+    let listener = TcpListener::bind(("127.0.0.1", 0))?;
+    let endpoint = format!("http://{}/v1/systemone", listener.local_addr()?);
+    let (sender, receiver) = mpsc::channel();
+    let handle = thread::spawn(move || {
+        let result = serve_overlap(&listener, routes);
+        let _ = sender.send(result);
+    });
+    Ok(StubServer {
+        endpoint,
+        receiver,
+        handle,
+        shutdown_sender: None,
+    })
+}
+
+fn serve_overlap(
+    listener: &TcpListener,
+    routes: Vec<(Vec<String>, ResponseScript)>,
+) -> Result<Vec<RequestRecord>, String> {
+    listener
+        .set_nonblocking(true)
+        .map_err(|error| error.to_string())?;
+    let routes = routes
+        .into_iter()
+        .map(|(mut ids, script)| {
+            ids.sort();
+            (ids, script)
+        })
+        .collect::<BTreeMap<_, _>>();
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let mut held = Vec::new();
+    while held.len() < routes.len() && std::time::Instant::now() < deadline {
+        match listener.accept() {
+            Ok((mut stream, _)) => {
+                stream
+                    .set_nonblocking(false)
+                    .map_err(|error| error.to_string())?;
+                let request = read_request(&mut stream)?;
+                held.push((stream, request));
+            }
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(2));
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    let arrived = held.len();
+    let mut requests = Vec::new();
+    for (mut stream, request) in held {
+        let body: Value =
+            serde_json::from_slice(&request.body).map_err(|error| error.to_string())?;
+        let mut ids = body["questions"]
+            .as_object()
+            .map(|questions| questions.keys().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        ids.sort();
+        let script = routes
+            .get(&ids)
+            .ok_or_else(|| format!("no scripted response for question IDs {ids:?}"))?;
+        let _ = write_response(&mut stream, script);
+        requests.push(request);
+    }
+    if arrived < routes.len() {
+        return Err(format!(
+            "only {arrived} of {} batch requests arrived while earlier responses were held",
+            routes.len()
+        ));
+    }
+    Ok(requests)
+}
+
+fn route(ids: &[&str], scripts: Vec<ResponseScript>) -> (Vec<String>, Vec<ResponseScript>) {
+    (ids.iter().map(|id| (*id).to_owned()).collect(), scripts)
+}
+
+fn question_ids(request: &RequestRecord) -> Result<Vec<String>, Box<dyn Error>> {
+    let body = parse_body(request)?;
+    let mut ids = body["questions"]
+        .as_object()
+        .ok_or("questions")?
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    ids.sort();
+    Ok(ids)
+}
+
 fn serve_stub(
     listener: &TcpListener,
     responses: Vec<ResponseScript>,
@@ -207,27 +359,10 @@ fn serve_stub(
         .set_nonblocking(true)
         .map_err(|error| error.to_string())?;
     let mut requests = Vec::with_capacity(responses.len());
-    for (response_index, response) in responses.into_iter().enumerate() {
+    for response in responses {
         let (mut stream, _) = accept_connection(listener)?;
         let request = read_request(&mut stream)?;
         requests.push(request);
-        if options.detect_early_request && response_index == 0 {
-            if let Some(mut early_stream) = find_early_connection(listener)? {
-                let _ = early_stream.set_read_timeout(Some(Duration::from_millis(100)));
-                let _ = read_request(&mut early_stream);
-                let _ = write_response(
-                    &mut early_stream,
-                    &ResponseScript {
-                        status: 503,
-                        body: "{}".to_owned(),
-                        delay: Duration::ZERO,
-                        location: None,
-                    },
-                );
-                let _ = write_response(&mut stream, &response);
-                return Err("a later request arrived before the first response".to_owned());
-            }
-        }
         if !response.delay.is_zero() {
             thread::sleep(response.delay);
         }
@@ -312,25 +447,6 @@ fn accept_connection(listener: &TcpListener) -> Result<(TcpStream, std::net::Soc
             Err(error) => return Err(error.to_string()),
         }
     }
-}
-
-fn find_early_connection(listener: &TcpListener) -> Result<Option<TcpStream>, String> {
-    let deadline = Instant::now() + Duration::from_millis(75);
-    while Instant::now() < deadline {
-        match listener.accept() {
-            Ok((stream, _)) => {
-                stream
-                    .set_nonblocking(false)
-                    .map_err(|error| error.to_string())?;
-                return Ok(Some(stream));
-            }
-            Err(error) if error.kind() == ErrorKind::WouldBlock => {
-                thread::sleep(Duration::from_millis(2));
-            }
-            Err(error) => return Err(error.to_string()),
-        }
-    }
-    Ok(None)
 }
 
 fn read_request(stream: &mut TcpStream) -> Result<RequestRecord, String> {
@@ -672,11 +788,19 @@ fn redirect_is_not_followed_and_keeps_sensitive_content_out_of_errors() -> Resul
 
 #[test]
 fn later_batch_retry_exhaustion_is_bounded_and_output_atomic() -> Result<(), Box<dyn Error>> {
-    let server = start_observing_sequential_stub(vec![
-        response(200, &valid_answers(&[("document-0", 0.2)])),
-        response(429, &json!({"error": "server-secret"})),
-        response(529, &json!({"error": "server-secret"})),
-        response(529, &json!({"error": "server-secret"})),
+    let server = start_routing_stub(vec![
+        route(
+            &["document-0"],
+            vec![response(200, &valid_answers(&[("document-0", 0.2)]))],
+        ),
+        route(
+            &["document-1"],
+            vec![
+                response(429, &json!({"error": "server-secret"})),
+                response(529, &json!({"error": "server-secret"})),
+                response(529, &json!({"error": "server-secret"})),
+            ],
+        ),
     ])?;
     let output = run_cli(
         &["--query", "private query", "--batch-size", "1"],
@@ -693,12 +817,13 @@ fn later_batch_retry_exhaustion_is_bounded_and_output_atomic() -> Result<(), Box
         .iter()
         .map(parse_body)
         .collect::<Result<Vec<_>, _>>()?;
-    assert_eq!(bodies[0]["state"]["documents"][0]["id"], "document-0");
-    assert_eq!(bodies[1]["state"]["documents"][0]["id"], "document-1");
-    assert_eq!(bodies[2]["state"]["documents"][0]["id"], "document-1");
-    assert_eq!(bodies[3]["state"]["documents"][0]["id"], "document-1");
-    assert_eq!(bodies[1], bodies[2]);
-    assert_eq!(bodies[2], bodies[3]);
+    let (first, second): (Vec<_>, Vec<_>) = bodies
+        .iter()
+        .partition(|body| body["state"]["documents"][0]["id"] == "document-0");
+    assert_eq!(first.len(), 1);
+    assert_eq!(second.len(), 3);
+    assert!(second.iter().all(|body| *body == second[0]));
+    assert_eq!(second[0]["state"]["documents"][0]["id"], "document-1");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("batch 2"));
     assert!(stderr.contains("529"));
@@ -875,16 +1000,25 @@ fn filter_keeps_evidence_in_input_order_and_can_return_empty() -> Result<(), Box
 fn compress_extracts_verbatim_units_with_full_context_across_batches() -> Result<(), Box<dyn Error>>
 {
     let source = "Silas B. Cobb paid $1.5 million. Payment requires approval. Unrelated news.";
-    let server = start_stub(vec![
-        response(
-            200,
-            &valid_answers(&[("document-0-unit-0", 0.8), ("document-0-unit-1", 0.5)]),
+    let server = start_routing_stub(vec![
+        route(
+            &["document-0-unit-0", "document-0-unit-1"],
+            vec![response(
+                200,
+                &valid_answers(&[("document-0-unit-0", 0.8), ("document-0-unit-1", 0.5)]),
+            )],
         ),
-        response(
-            200,
-            &valid_answers(&[("document-0-unit-2", 0.5), ("document-0-unit-3", 0.1)]),
+        route(
+            &["document-0-unit-2", "document-0-unit-3"],
+            vec![response(
+                200,
+                &valid_answers(&[("document-0-unit-2", 0.5), ("document-0-unit-3", 0.1)]),
+            )],
         ),
-        response(200, &valid_answers(&[("document-1-unit-0", 0.2)])),
+        route(
+            &["document-1-unit-0"],
+            vec![response(200, &valid_answers(&[("document-1-unit-0", 0.2)]))],
+        ),
     ])?;
     let input = json!([
         {"body": source, "title":"Funding", "source":"manual", "compressedText":"stale", "huge":18_446_744_073_709_551_617_i128},
@@ -908,7 +1042,7 @@ fn compress_extracts_verbatim_units_with_full_context_across_batches() -> Result
         Some(&server.endpoint),
         Some(DUMMY_KEY),
     )?;
-    let requests = server.finish()?;
+    let requests = server.shutdown_and_finish()?;
     assert_success(&output);
     let result: Value = serde_json::from_slice(&output.stdout)?;
     assert_eq!(result.as_array().ok_or("array")?.len(), 1);
@@ -920,15 +1054,23 @@ fn compress_extracts_verbatim_units_with_full_context_across_batches() -> Result
         "Silas B. Cobb paid $1.5 million. Payment requires approval."
     );
     assert_eq!(requests.len(), 3);
-    for request in requests.iter().take(2) {
+    let mut first_document_requests = Vec::new();
+    for request in &requests {
         let body = parse_body(request)?;
-        assert_eq!(
-            body["state"]["documents"][0]["text"],
-            format!("Funding\n\n{source}")
-        );
-        assert_eq!(body["questions"].as_object().ok_or("questions")?.len(), 2);
+        if body["state"]["documents"][0]["id"] == "document-0" {
+            assert_eq!(
+                body["state"]["documents"][0]["text"],
+                format!("Funding\n\n{source}")
+            );
+            assert_eq!(body["questions"].as_object().ok_or("questions")?.len(), 2);
+            first_document_requests.push(body);
+        }
     }
-    let body = parse_body(&requests[0])?;
+    assert_eq!(first_document_requests.len(), 2);
+    let body = first_document_requests
+        .into_iter()
+        .find(|body| body["questions"].get("document-0-unit-0").is_some())
+        .ok_or("first unit request")?;
     assert_eq!(
         body["state"]["documents"][0]["units"][0]["text"],
         "Silas B. "
@@ -943,9 +1085,15 @@ fn compress_extracts_verbatim_units_with_full_context_across_batches() -> Result
 
 #[test]
 fn compression_failure_in_later_batch_emits_no_partial_results() -> Result<(), Box<dyn Error>> {
-    let server = start_stub(vec![
-        response(200, &valid_answers(&[("document-0-unit-0", 0.9)])),
-        response(200, &valid_answers(&[("wrong-unit", 0.9)])),
+    let server = start_routing_stub(vec![
+        route(
+            &["document-0-unit-0"],
+            vec![response(200, &valid_answers(&[("document-0-unit-0", 0.9)]))],
+        ),
+        route(
+            &["document-0-unit-1"],
+            vec![response(200, &valid_answers(&[("wrong-unit", 0.9)]))],
+        ),
     ])?;
     let output = run_cli(
         &["--query", "q", "--mode", "compress", "--batch-size", "1"],
@@ -953,7 +1101,7 @@ fn compression_failure_in_later_batch_emits_no_partial_results() -> Result<(), B
         Some(&server.endpoint),
         Some(DUMMY_KEY),
     )?;
-    let _ = server.finish()?;
+    let _ = server.shutdown_and_finish()?;
     assert_eq!(output.status.code(), Some(1));
     assert!(output.stdout.is_empty());
     Ok(())
@@ -1009,14 +1157,15 @@ fn compress_handles_multilingual_text_without_configuration() -> Result<(), Box<
             ));
         }
     }
-    let responses = ordered
+    let routes = ordered
         .chunks(30)
         .map(|chunk| {
+            let ids = chunk.iter().map(|(id, _)| id.clone()).collect();
             let answers: serde_json::Map<_, _> = chunk.iter().cloned().collect();
-            response(200, &json!({"answers":answers}))
+            (ids, vec![response(200, &json!({"answers":answers}))])
         })
         .collect();
-    let server = start_observing_responses(responses)?;
+    let server = start_routing_stub(routes)?;
     let output = run_cli(
         &[
             "--query",
@@ -1038,5 +1187,180 @@ fn compress_handles_multilingual_text_without_configuration() -> Result<(), Box<
         assert_eq!(actual["text"], case["text"]);
         assert_eq!(actual["id"], case["id"]);
     }
+    Ok(())
+}
+
+fn token_limit_response() -> ResponseScript {
+    response(
+        400,
+        &json!({"detail": {"error_type": "max_tokens_exceeded"}, "echo": "server-secret"}),
+    )
+}
+
+#[test]
+fn token_limit_halves_the_batch_and_keeps_answers_aligned() -> Result<(), Box<dyn Error>> {
+    let server = start_routing_stub(vec![
+        route(
+            &["document-0", "document-1", "document-2"],
+            vec![token_limit_response()],
+        ),
+        route(
+            &["document-0"],
+            vec![response(200, &valid_answers(&[("document-0", 0.1)]))],
+        ),
+        route(
+            &["document-1", "document-2"],
+            vec![response(
+                200,
+                &valid_answers(&[("document-1", 0.9), ("document-2", 0.5)]),
+            )],
+        ),
+    ])?;
+    let output = run_cli(
+        &["--query", "q"],
+        r#"[{"id":"a","text":"first"},{"id":"b","text":"second"},{"id":"c","text":"third"}]"#,
+        Some(&server.endpoint),
+        Some(DUMMY_KEY),
+    )?;
+    let requests = server.shutdown_and_finish()?;
+    assert_success(&output);
+    assert_eq!(requests.len(), 3);
+    for request in &requests {
+        let body = parse_body(request)?;
+        let documents = body["state"]["documents"]
+            .as_array()
+            .ok_or("documents")?
+            .iter()
+            .map(|document| document["id"].as_str().unwrap_or_default().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(documents, question_ids(request)?);
+    }
+    let result: Value = serde_json::from_slice(&output.stdout)?;
+    let ids = result
+        .as_array()
+        .ok_or("array")?
+        .iter()
+        .map(|item| item["id"].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(json!(ids), json!(["b", "c", "a"]));
+    Ok(())
+}
+
+#[test]
+fn single_item_over_token_limit_names_the_item() -> Result<(), Box<dyn Error>> {
+    let server = start_routing_stub(vec![
+        route(
+            &["document-0"],
+            vec![response(200, &valid_answers(&[("document-0", 0.5)]))],
+        ),
+        route(&["document-1"], vec![token_limit_response()]),
+    ])?;
+    let output = run_cli(
+        &["--query", "private query", "--batch-size", "1"],
+        r#"[{"text":"short document"},{"text":"oversized private document"}]"#,
+        Some(&server.endpoint),
+        Some(DUMMY_KEY),
+    )?;
+    let requests = server.shutdown_and_finish()?;
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| question_ids(request).is_ok_and(|ids| ids == ["document-1"]))
+            .count(),
+        1
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("input item 1"));
+    assert!(stderr.contains("token limit"));
+    for secret in [
+        DUMMY_KEY,
+        "private query",
+        "oversized private",
+        "server-secret",
+    ] {
+        assert!(
+            !stderr.contains(secret),
+            "stderr leaked {secret:?}: {stderr}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn other_bad_requests_are_not_split_or_retried() -> Result<(), Box<dyn Error>> {
+    let server = start_routing_stub(vec![route(
+        &["document-0", "document-1"],
+        vec![response(400, &json!({"detail": "server-secret"}))],
+    )])?;
+    let output = run_cli(
+        &["--query", "q"],
+        r#"[{"text":"first"},{"text":"second"}]"#,
+        Some(&server.endpoint),
+        Some(DUMMY_KEY),
+    )?;
+    let requests = server.shutdown_and_finish()?;
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert_eq!(requests.len(), 1);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("batch 1 returned HTTP status 400"));
+    assert!(!stderr.contains("server-secret"));
+    Ok(())
+}
+
+#[test]
+fn the_lowest_failed_batch_is_reported_regardless_of_arrival_order() -> Result<(), Box<dyn Error>> {
+    let server = start_routing_stub(vec![
+        route(
+            &["document-0"],
+            vec![response(200, &valid_answers(&[("document-0", 0.5)]))],
+        ),
+        route(&["document-1"], vec![response(401, &json!({}))]),
+        route(&["document-2"], vec![response(401, &json!({}))]),
+    ])?;
+    let output = run_cli(
+        &["--query", "q", "--batch-size", "1"],
+        r#"[{"text":"first"},{"text":"second"},{"text":"third"}]"#,
+        Some(&server.endpoint),
+        Some(DUMMY_KEY),
+    )?;
+    let _ = server.shutdown_and_finish()?;
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("batch 2 returned HTTP status 401"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("batch 3"));
+    Ok(())
+}
+
+#[test]
+fn batches_are_sent_without_waiting_for_earlier_responses() -> Result<(), Box<dyn Error>> {
+    let server = start_overlap_stub(vec![
+        (
+            vec!["document-0".to_owned()],
+            response(200, &valid_answers(&[("document-0", 0.2)])),
+        ),
+        (
+            vec!["document-1".to_owned()],
+            response(200, &valid_answers(&[("document-1", 0.8)])),
+        ),
+    ])?;
+    let output = run_cli(
+        &["--query", "q", "--batch-size", "1"],
+        r#"[{"id":"a","text":"first"},{"id":"b","text":"second"}]"#,
+        Some(&server.endpoint),
+        Some(DUMMY_KEY),
+    )?;
+    let requests = server.finish()?;
+    assert_success(&output);
+    assert_eq!(requests.len(), 2);
+    let result: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(result[0]["id"], "b");
+    assert_eq!(result[1]["id"], "a");
     Ok(())
 }

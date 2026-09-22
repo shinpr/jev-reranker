@@ -67,6 +67,11 @@ pub enum AppError {
 
     #[error("batch {batch} returned an invalid response or answer set")]
     InvalidResponse { batch: usize },
+
+    #[error(
+        "batch {batch}: input item {index} exceeds the Jev request token limit on its own; shorten its text, context fields, or the query"
+    )]
+    ItemTooLarge { batch: usize, index: usize },
 }
 
 impl AppError {
@@ -87,7 +92,8 @@ impl AppError {
             | Self::HttpTransport { .. }
             | Self::HttpStatus { .. }
             | Self::HttpRetryExhausted { .. }
-            | Self::InvalidResponse { .. } => 1,
+            | Self::InvalidResponse { .. }
+            | Self::ItemTooLarge { .. } => 1,
             #[cfg(debug_assertions)]
             Self::InvalidTestEndpoint => 1,
             #[cfg(not(debug_assertions))]

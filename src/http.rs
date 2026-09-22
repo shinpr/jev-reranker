@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::env;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -14,6 +15,7 @@ use crate::preparation::PreparedDocument;
 const PRODUCTION_ENDPOINT: &str = "https://api.typesafe.ai/v1/systemone";
 const TEST_ENDPOINT_VARIABLE: &str = "JEV_RERANKER_TEST_ENDPOINT";
 const API_KEY_VARIABLE: &str = "TYPESAFE_API_KEY";
+const MAX_CONCURRENT_BATCHES: usize = 4;
 
 #[derive(Serialize)]
 struct SystemOneRequest<'a> {
@@ -104,12 +106,83 @@ pub fn score_documents(
         api_key: &api_key,
         options,
     };
-    let mut scores = Vec::with_capacity(targets.len());
-    for (batch_index, batch) in targets.chunks(options.batch_size).enumerate() {
-        let batch_scores = request_batch(&context, batch_index + 1, batch)?;
-        scores.extend(batch_scores);
+    let batches = targets.chunks(options.batch_size).collect::<Vec<_>>();
+    score_batches(&context, &batches)
+}
+
+// Batches are claimed in ascending order, so every batch before the lowest failure has completed.
+fn score_batches(
+    context: &RequestContext<'_>,
+    batches: &[&[Target<'_>]],
+) -> Result<Vec<f64>, AppError> {
+    let next = AtomicUsize::new(0);
+    let failed = AtomicBool::new(false);
+    let completed = thread::scope(|scope| {
+        let workers = (0..MAX_CONCURRENT_BATCHES.min(batches.len()))
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut results = Vec::new();
+                    while !failed.load(Ordering::Relaxed) {
+                        let index = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(batch) = batches.get(index) else {
+                            break;
+                        };
+                        let result = score_batch(context, index + 1, batch);
+                        failed.fetch_or(result.is_err(), Ordering::Relaxed);
+                        results.push((index, result));
+                    }
+                    results
+                })
+            })
+            .collect::<Vec<_>>();
+        workers
+            .into_iter()
+            .flat_map(|worker| {
+                worker
+                    .join()
+                    .unwrap_or_else(|payload| std::panic::resume_unwind(payload))
+            })
+            .collect::<Vec<_>>()
+    });
+    collect_in_batch_order(completed)
+}
+
+fn collect_in_batch_order(
+    mut completed: Vec<(usize, Result<Vec<f64>, AppError>)>,
+) -> Result<Vec<f64>, AppError> {
+    completed.sort_by_key(|(index, _)| *index);
+    let mut scores = Vec::new();
+    for (_, result) in completed {
+        scores.extend(result?);
     }
     Ok(scores)
+}
+
+fn score_batch(
+    context: &RequestContext<'_>,
+    batch: usize,
+    targets: &[Target<'_>],
+) -> Result<Vec<f64>, AppError> {
+    match request_batch(context, batch, targets)? {
+        BatchOutcome::Scores(scores) => Ok(scores),
+        BatchOutcome::TooLarge => {
+            if let [target] = targets {
+                return Err(AppError::ItemTooLarge {
+                    batch,
+                    index: target.document.original_index,
+                });
+            }
+            let (first, second) = targets.split_at(targets.len() / 2);
+            let mut scores = score_batch(context, batch, first)?;
+            scores.extend(score_batch(context, batch, second)?);
+            Ok(scores)
+        }
+    }
+}
+
+enum BatchOutcome {
+    Scores(Vec<f64>),
+    TooLarge,
 }
 
 struct RequestContext<'a> {
@@ -159,7 +232,7 @@ fn request_batch(
     context: &RequestContext<'_>,
     batch: usize,
     documents: &[Target<'_>],
-) -> Result<Vec<f64>, AppError> {
+) -> Result<BatchOutcome, AppError> {
     let request = compose_request(documents, context.options);
     let ids = documents.iter().map(Target::id).collect::<Vec<_>>();
     for attempt in 0..=2 {
@@ -189,14 +262,23 @@ fn request_batch(
             return Err(AppError::HttpRetryExhausted { batch, status });
         }
         if !response.status().is_success() {
+            if status == 400 && is_token_limit(response) {
+                return Ok(BatchOutcome::TooLarge);
+            }
             return Err(AppError::HttpStatus { batch, status });
         }
         let body = response
             .json::<Value>()
             .map_err(|_| AppError::InvalidResponse { batch })?;
-        return parse_answers(&body, &ids, batch);
+        return parse_answers(&body, &ids, batch).map(BatchOutcome::Scores);
     }
     Err(AppError::HttpRetryExhausted { batch, status: 529 })
+}
+
+fn is_token_limit(response: reqwest::blocking::Response) -> bool {
+    response.json::<Value>().is_ok_and(|body| {
+        body.pointer("/detail/error_type").and_then(Value::as_str) == Some("max_tokens_exceeded")
+    })
 }
 
 fn compose_request<'a>(
@@ -286,4 +368,38 @@ fn parse_answers(body: &Value, ids: &[String], batch: usize) -> Result<Vec<f64>,
         scores.push(score);
     }
     Ok(scores)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::collect_in_batch_order;
+    use crate::error::AppError;
+
+    #[test]
+    fn reports_the_lowest_failed_batch_and_concatenates_in_batch_order() {
+        let completed = vec![
+            (1, Ok(vec![0.3])),
+            (
+                4,
+                Err(AppError::HttpStatus {
+                    batch: 5,
+                    status: 401,
+                }),
+            ),
+            (0, Ok(vec![0.1, 0.2])),
+            (
+                2,
+                Err(AppError::HttpStatus {
+                    batch: 3,
+                    status: 500,
+                }),
+            ),
+        ];
+        assert!(matches!(
+            collect_in_batch_order(completed),
+            Err(AppError::HttpStatus { batch: 3, .. })
+        ));
+        let scores = collect_in_batch_order(vec![(1, Ok(vec![0.3])), (0, Ok(vec![0.1, 0.2]))]);
+        assert!(matches!(scores.as_deref(), Ok([0.1, 0.2, 0.3])));
+    }
 }

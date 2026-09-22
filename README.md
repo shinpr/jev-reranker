@@ -86,6 +86,10 @@ search-command --json \
 ambiguous on their own. `distance`, `id`, and `source` pass through unchanged. Existing retrieval
 scores do not affect Jev's judgment or the output order.
 
+Pass more candidates than you plan to keep and let `--top` trim the output. Jev can move a relevant
+document that search ranked low to the top. Every candidate is scored before `--top` applies, so
+each additional 30 candidates adds one API request.
+
 ## Choose a Mode
 
 | Mode | Use it to | Output |
@@ -100,16 +104,14 @@ with the same query. Each invocation makes its own API requests.
 <details>
 <summary>API usage and retries</summary>
 
-Rerank and filter make one sequential request per 30 candidates by default. Compression scores
-every sentence or line, so long candidates can require more requests than ranking. Each compression
-batch includes the full text and selected context of the documents it judges. A document with 100
-units sends four copies of that context with `--batch-size 30`; smaller batches can increase the
-total input sent to Jev and its cost. `--top` does not reduce API work or the number of extracted
-units. See [TypeSafe's current Jev pricing](https://typesafe.ai/).
+Rerank and filter make one request per 30 candidates by default. A batch too large for one request
+is split, which adds requests. Compression scores every sentence or line, so long candidates need
+more requests, and each request repeats the full text and selected context of the documents it
+judges. Smaller `--batch-size` values increase that repetition and its cost. See [TypeSafe's current
+Jev pricing](https://typesafe.ai/).
 
 `--timeout-ms` applies to each HTTP attempt, not the whole run. HTTP 429 and 529 responses are
-retried up to twice, after waits of 250 ms and 500 ms. Other HTTP errors, timeouts, and transport
-failures are not retried. Total runtime depends on the number of batches and retries.
+retried up to twice; other failures are not retried.
 
 </details>
 
@@ -150,9 +152,8 @@ The original text and metadata remain available. The example below shows the out
 }
 ```
 
-Pass `compressedText` to your downstream LLM to reduce its context. Passing the whole output
-object also sends the original text and saves no space. Documents with no selected units are
-omitted.
+Pass `compressedText` to your downstream LLM to reduce its context. Documents with no selected units
+are omitted.
 
 Sentence/line extraction is intended for prose. For code, tables, and unusual formatting,
 whole-document `filter` mode may work better. Selected context fields help Jev interpret the text
@@ -208,13 +209,10 @@ bodies, request headers, or credentials.
 
 | Option | Default | Description |
 | --- | --- | --- |
-| `--threshold <number>` | `0.5` | Minimum score to keep a document or unit. Filter and compress only. |
+| `--threshold <number>` | `0.5` | Minimum score, from 0 to 1, to keep a document or unit. Filter and compress only. |
 | `--model <name>` | `jev-latest` | Jev model route. |
 | `--batch-size <n>` | `30` | Judgments per request, from 1 through 30. Compress judges sentences/lines. |
 | `--timeout-ms <n>` | `10000` | Timeout for each HTTP attempt, in milliseconds. |
-
-`--threshold` accepts values from 0 to 1. Lower values keep more material; higher values discard
-more. It applies to documents in filter mode and individual units in compress mode.
 
 </details>
 
