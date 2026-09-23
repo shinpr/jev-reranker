@@ -1,6 +1,6 @@
 [package]
 name = "jev-reranker"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 publish = false
 description = "Rerank JSON search results with TypeSafe AI's Jev"
