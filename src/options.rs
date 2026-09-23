@@ -10,7 +10,7 @@ pub enum Mode {
 }
 
 #[derive(Clone, Debug, Parser, PartialEq)]
-#[command(name = "jev-reranker")]
+#[command(name = "jev-reranker", version)]
 pub struct CliOptions {
     #[arg(long)]
     pub query: String,
