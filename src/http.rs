@@ -96,6 +96,7 @@ pub fn score_documents(
     let endpoint = endpoint()?;
     let api_key = api_key()?;
     let client = Client::builder()
+        .user_agent(concat!("jev-reranker/", env!("CARGO_PKG_VERSION")))
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_millis(options.timeout_ms))
         .build()
