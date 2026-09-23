@@ -87,8 +87,9 @@ ambiguous on their own. `distance`, `id`, and `source` pass through unchanged. E
 scores do not affect Jev's judgment or the output order.
 
 Pass more candidates than you plan to keep and let `--top` trim the output. Jev can move a relevant
-document that search ranked low to the top. Every candidate is scored before `--top` applies, so
-each additional 30 candidates adds one API request.
+document that search ranked low to the top. On FiQA, reranking BM25's top 100 instead of its top 30
+raised nDCG@10 from 0.36 to 0.40. Every candidate is scored before `--top` applies, so each
+additional 30 candidates adds one API request.
 
 ## Choose a Mode
 
@@ -215,6 +216,19 @@ bodies, request headers, or credentials.
 | `--timeout-ms <n>` | `10000` | Timeout for each HTTP attempt, in milliseconds. |
 
 </details>
+
+## Benchmarks
+
+On three BEIR datasets, reranking BM25's top 30 raised nDCG@10 by 0.06 to 0.13:
+
+| Dataset | BM25 order | `jev-reranker` |
+| --- | --- | --- |
+| SciFact | 0.68 | 0.76–0.77 |
+| NFCorpus | 0.27 | 0.33 |
+| FiQA | 0.24 | 0.36–0.37 |
+
+Each query cost less than $0.001. [BENCHMARKS.md](BENCHMARKS.md) has the setup, the effect of
+candidate depth, run-to-run variation, and the limits of these numbers.
 
 ## Background
 
