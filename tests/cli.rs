@@ -876,8 +876,12 @@ fn transport_failure_is_not_retried() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn non_retryable_status_is_reported_without_reading_response_body() -> Result<(), Box<dyn Error>> {
-    let server = start_stub(vec![response(401, &json!({"secret": "server-secret"}))])?;
+fn non_retryable_status_reports_only_the_server_message() -> Result<(), Box<dyn Error>> {
+    let body = json!({
+        "detail": {"message": "Unknown\u{1b}[31m model", "input": "server-secret"},
+        "secret": "server-secret"
+    });
+    let server = start_stub(vec![response(400, &body)])?;
     let output = run_cli(
         &["--query", "q", "--mode", "rerank"],
         r#"[{"text":"body"}]"#,
@@ -889,9 +893,29 @@ fn non_retryable_status_is_reported_without_reading_response_body() -> Result<()
     assert_eq!(output.status.code(), Some(1));
     assert!(output.stdout.is_empty());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("401"));
+    assert!(stderr.contains("HTTP status 400: Unknown [31m model"));
+    assert!(!stderr.contains('\u{1b}'));
     assert!(!stderr.contains(DUMMY_KEY));
     assert!(!stderr.contains("server-secret"));
+    Ok(())
+}
+
+#[test]
+fn server_errors_are_retried_before_failing_the_run() -> Result<(), Box<dyn Error>> {
+    let server = start_stub(vec![
+        response(503, &json!({})),
+        response(500, &json!({})),
+        response(200, &valid_answers(&[("document-0", 0.7)])),
+    ])?;
+    let output = run_cli(
+        &["--query", "q", "--mode", "rerank"],
+        r#"[{"text":"body"}]"#,
+        Some(&server.endpoint),
+        Some(DUMMY_KEY),
+    )?;
+    let requests = server.finish()?;
+    assert_eq!(requests.len(), 3);
+    assert_success(&output);
     Ok(())
 }
 
@@ -1362,5 +1386,69 @@ fn batches_are_sent_without_waiting_for_earlier_responses() -> Result<(), Box<dy
     let result: Value = serde_json::from_slice(&output.stdout)?;
     assert_eq!(result[0]["id"], "b");
     assert_eq!(result[1]["id"], "a");
+    Ok(())
+}
+
+fn scratch_directory(name: &str) -> io::Result<std::path::PathBuf> {
+    let directory = std::env::temp_dir().join(format!(
+        "jev-reranker-{name}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_nanos())
+    ));
+    std::fs::create_dir_all(&directory)?;
+    Ok(directory)
+}
+
+#[test]
+fn skills_install_writes_the_bundled_skill_to_each_target() -> Result<(), Box<dyn Error>> {
+    let expected = include_str!("../skills/jev-reranker/SKILL.md");
+    let root = scratch_directory("skills")?;
+    let home = root.join("home");
+    for (args, installed) in [
+        (
+            vec!["--path", "custom"],
+            root.join("custom/jev-reranker/SKILL.md"),
+        ),
+        (
+            vec!["--claude-code"],
+            root.join(".claude/skills/jev-reranker/SKILL.md"),
+        ),
+        (
+            vec!["--claude-code", "--global"],
+            home.join(".claude/skills/jev-reranker/SKILL.md"),
+        ),
+        (
+            vec!["--codex", "--project"],
+            root.join(".codex/skills/jev-reranker/SKILL.md"),
+        ),
+        // An empty CODEX_HOME counts as unset.
+        (
+            vec!["--codex"],
+            home.join(".codex/skills/jev-reranker/SKILL.md"),
+        ),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_jev-reranker"))
+            .args(["skills", "install"])
+            .args(&args)
+            .current_dir(&root)
+            .env("HOME", &home)
+            .env("USERPROFILE", &home)
+            .env("CODEX_HOME", "")
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(std::fs::read_to_string(&installed)?, expected);
+    }
+    let missing_target = Command::new(env!("CARGO_BIN_EXE_jev-reranker"))
+        .args(["skills", "install"])
+        .current_dir(&root)
+        .output()?;
+    assert_eq!(missing_target.status.code(), Some(2));
+    std::fs::remove_dir_all(&root)?;
     Ok(())
 }

@@ -18,6 +18,7 @@ mod options;
 mod preparation;
 mod ranking;
 mod serialization;
+mod skills;
 
 use std::io::{self, Read, Write};
 
@@ -25,14 +26,18 @@ use clap::Parser;
 
 use crate::error::AppError;
 use crate::http::score_documents;
-use crate::options::{resolve_options, CliOptions};
+use crate::options::{resolve_options, CliOptions, Command};
 use crate::preparation::{parse_input, prepare_documents};
 use crate::ranking::rank_documents;
 use crate::serialization::serialize_output;
 
 fn main() {
     let cli = CliOptions::parse();
-    match run(cli) {
+    let result = match &cli.command {
+        Some(Command::Skills(command)) => skills::run(command),
+        None => run(cli),
+    };
+    match result {
         Ok(output) => {
             if let Err(source) = io::stdout().write_all(&output) {
                 eprintln!("{}", AppError::Io { source });

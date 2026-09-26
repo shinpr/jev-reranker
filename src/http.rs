@@ -248,25 +248,36 @@ fn request_batch(
             Err(error) if error.is_timeout() => {
                 return Err(AppError::HttpTimeout { batch });
             }
+            // A failed connection never reached the server, so retrying cannot double-charge.
+            Err(error) if error.is_connect() && attempt < 2 => {
+                thread::sleep(retry_delay(attempt));
+                continue;
+            }
             Err(_) => {
                 return Err(AppError::HttpTransport { batch });
             }
         };
         let status = response.status().as_u16();
-        // Retry only rate limiting and overload responses; other statuses fail immediately.
-        if status == 429 || status == 529 {
+        // Retry rate limiting, overload, and server failures, as TypeSafe's SDKs do; other statuses
+        // fail immediately.
+        if matches!(status, 429 | 500 | 502 | 503 | 504 | 529) {
             if attempt < 2 {
-                let delay = if attempt == 0 { 250 } else { 500 };
-                thread::sleep(Duration::from_millis(delay));
+                thread::sleep(retry_delay(attempt));
                 continue;
             }
             return Err(AppError::HttpRetryExhausted { batch, status });
         }
         if !response.status().is_success() {
-            if status == 400 && is_token_limit(response) {
+            let body = response.json::<Value>().ok();
+            if status == 400 && body.as_ref().is_some_and(is_token_limit) {
                 return Ok(BatchOutcome::TooLarge);
             }
-            return Err(AppError::HttpStatus { batch, status });
+            let message = body.as_ref().and_then(server_message);
+            return Err(AppError::HttpStatus {
+                batch,
+                status,
+                message,
+            });
         }
         let body = response
             .json::<Value>()
@@ -276,10 +287,32 @@ fn request_batch(
     Err(AppError::HttpRetryExhausted { batch, status: 529 })
 }
 
-fn is_token_limit(response: reqwest::blocking::Response) -> bool {
-    response.json::<Value>().is_ok_and(|body| {
-        body.pointer("/detail/error_type").and_then(Value::as_str) == Some("max_tokens_exceeded")
-    })
+fn retry_delay(attempt: usize) -> Duration {
+    Duration::from_millis(if attempt == 0 { 250 } else { 500 })
+}
+
+fn is_token_limit(body: &Value) -> bool {
+    body.pointer("/detail/error_type").and_then(Value::as_str) == Some("max_tokens_exceeded")
+}
+
+// Only the API's human-readable message is shown. Other body fields, such as validation
+// errors that echo request input, never reach stderr.
+fn server_message(body: &Value) -> Option<String> {
+    const MAX_CHARS: usize = 200;
+    let message = body.pointer("/detail/message").and_then(Value::as_str)?;
+    let sanitized = message
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .take(MAX_CHARS)
+        .collect::<String>();
+    let trimmed = sanitized.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_owned())
 }
 
 fn compose_request<'a>(
@@ -385,6 +418,7 @@ mod tests {
                 Err(AppError::HttpStatus {
                     batch: 5,
                     status: 401,
+                    message: None,
                 }),
             ),
             (0, Ok(vec![0.1, 0.2])),
@@ -393,6 +427,7 @@ mod tests {
                 Err(AppError::HttpStatus {
                     batch: 3,
                     status: 500,
+                    message: None,
                 }),
             ),
         ];

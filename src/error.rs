@@ -39,6 +39,16 @@ pub enum AppError {
         source: std::io::Error,
     },
 
+    #[error("could not install the skill to {path}: {source}")]
+    SkillInstall {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("{variable} is not set; pass --path to choose where to install the skill")]
+    MissingHome { variable: &'static str },
+
     #[error("TYPESAFE_API_KEY is required for non-empty input")]
     MissingCredential,
 
@@ -59,8 +69,12 @@ pub enum AppError {
     #[error("batch {batch} request failed due to a transport error")]
     HttpTransport { batch: usize },
 
-    #[error("batch {batch} returned HTTP status {status}")]
-    HttpStatus { batch: usize, status: u16 },
+    #[error("batch {batch} returned HTTP status {status}{}", describe_message(message.as_deref()))]
+    HttpStatus {
+        batch: usize,
+        status: u16,
+        message: Option<String>,
+    },
 
     #[error("batch {batch} returned retryable HTTP status {status} after retry exhaustion")]
     HttpRetryExhausted { batch: usize, status: u16 },
@@ -72,6 +86,10 @@ pub enum AppError {
         "batch {batch}: input item {index} exceeds the Jev request token limit on its own; shorten its text, context fields, or the query"
     )]
     ItemTooLarge { batch: usize, index: usize },
+}
+
+fn describe_message(message: Option<&str>) -> String {
+    message.map_or_else(String::new, |message| format!(": {message}"))
 }
 
 impl AppError {
@@ -86,6 +104,8 @@ impl AppError {
             | Self::ScoreCountMismatch { .. }
             | Self::Serialization { .. }
             | Self::Io { .. }
+            | Self::SkillInstall { .. }
+            | Self::MissingHome { .. }
             | Self::MissingCredential
             | Self::HttpClient
             | Self::HttpTimeout { .. }
