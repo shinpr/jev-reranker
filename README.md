@@ -34,7 +34,7 @@ npm install --global jev-reranker
 You can also run it without a global installation:
 
 ```sh
-npx -y jev-reranker --help
+npx jev-reranker --help
 ```
 
 Create an API key in the [TypeSafe dashboard](https://console.typesafe.ai/), then export it:
@@ -103,16 +103,12 @@ These modes run separately. To rank and then filter or compress, pipe one invoca
 with the same query. Each invocation makes its own API requests.
 
 <details>
-<summary>API usage and retries</summary>
+<summary>API usage</summary>
 
-Rerank and filter make one request per 30 candidates by default. A batch too large for one request
+Rerank and filter make one request per 30 candidates. A batch too large for one request
 is split, which adds requests. Compression scores every sentence or line, so long candidates need
 more requests, and each request repeats the full text and selected context of the documents it
-judges. Smaller `--batch-size` values increase that repetition and its cost. See [TypeSafe's current
-Jev pricing](https://typesafe.ai/).
-
-`--timeout-ms` applies to each HTTP attempt, not the whole run. HTTP 429 and 529 responses are
-retried up to twice; other failures are not retried.
+judges. See [TypeSafe's current Jev pricing](https://typesafe.ai/).
 
 </details>
 
@@ -192,8 +188,9 @@ System One API. Other object fields, including the source score, stay local. The
 only from `TYPESAFE_API_KEY`; there is no command-line key option.
 
 Results are buffered until every batch succeeds, so a failed request leaves stdout empty instead
-of producing a partial JSON document. Error messages do not include document text, response
-bodies, request headers, or credentials.
+of producing a partial JSON document. Error messages can end up in logs, so the CLI never writes
+document text, request headers, or your API key into them. When the API rejects a request, the
+API's own short error message is shown as returned.
 
 ## Options
 
@@ -212,10 +209,23 @@ bodies, request headers, or credentials.
 | --- | --- | --- |
 | `--threshold <number>` | `0.5` | Minimum score, from 0 to 1, to keep a document or unit. Filter and compress only. |
 | `--model <name>` | `jev-latest` | Jev model route. |
-| `--batch-size <n>` | `30` | Judgments per request, from 1 through 30. Compress judges sentences/lines. |
 | `--timeout-ms <n>` | `10000` | Timeout for each HTTP attempt, in milliseconds. |
 
 </details>
+
+## Agent Skill
+
+An [Agent Skill](https://agentskills.io/) teaches coding assistants to pipe search results through
+`jev-reranker` before answering. Install it for your assistant:
+
+```sh
+npx jev-reranker skills install --claude-code           # this project
+npx jev-reranker skills install --claude-code --global  # every project
+npx jev-reranker skills install --codex
+```
+
+`--path <dir>` installs it anywhere else. The skill matches the installed CLI version, so run the
+command again after upgrading.
 
 ## Benchmarks
 

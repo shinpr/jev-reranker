@@ -61,7 +61,7 @@ candidates added little wall time in this sample.
 Smaller batches did not improve nDCG@10. On the depth comparison's queries with 30 candidates,
 one run each:
 
-| `--batch-size` | SciFact | NFCorpus | FiQA | Cost |
+| Batch size | SciFact | NFCorpus | FiQA | Cost |
 | --- | --- | --- | --- | --- |
 | 10 | −0.009 [−0.024, +0.004] | −0.008 [−0.021, +0.002] | +0.005 [+0.001, +0.011] | 5% more tokens |
 | 1 | −0.015 [−0.039, +0.009] | −0.004 [−0.018, +0.011] | +0.000 [−0.018, +0.017] | 60 to 70% more tokens, 30 times the requests |
@@ -69,7 +69,7 @@ one run each:
 Differences are against the default of 30. FiQA's +0.005 at 10 is small and close to the
 run-to-run variation seen in the quality runs. Its interval excludes zero, but the interval does
 not include run-to-run variation. Every other interval includes zero. These results give no
-reason to change the default `--batch-size` for rerank.
+reason to change the default batch size for rerank.
 
 Mixing in the BM25 score did not help either. This used 60 SciFact and 60 NFCorpus test queries from
 an earlier prompt comparison, with 20 candidates each and two runs averaged. A weighted sum with

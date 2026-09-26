@@ -12,6 +12,8 @@ pub struct PreparedDocument {
 }
 
 pub fn parse_input(input: &str) -> Result<Vec<Map<String, Value>>, AppError> {
+    // Some Windows tools write a UTF-8 byte order mark before the JSON text.
+    let input = input.strip_prefix('\u{feff}').unwrap_or(input);
     let value: Value = serde_json::from_str(input).map_err(|source| AppError::Json { source })?;
     let Value::Array(values) = value else {
         return Err(AppError::InvalidInput {
@@ -189,6 +191,8 @@ mod tests {
             missing_text,
             Err(crate::error::AppError::InvalidItem { .. })
         ));
+
+        assert!(matches!(parse_input("\u{feff}[]").as_deref(), Ok([])));
 
         let malformed = parse_input("[");
         assert!(matches!(

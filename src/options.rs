@@ -1,4 +1,4 @@
-use clap::{Parser, ValueEnum};
+use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::error::AppError;
 
@@ -10,37 +10,62 @@ pub enum Mode {
 }
 
 #[derive(Clone, Debug, Parser, PartialEq)]
-#[command(name = "jev-reranker", version)]
+#[command(
+    name = "jev-reranker",
+    version,
+    about = "Rerank, filter, or compress JSON search results with TypeSafe AI's Jev",
+    after_help = "Reads a JSON array of objects from stdin and writes a JSON array to stdout.\nRequests need TYPESAFE_API_KEY in the environment.",
+    subcommand_negates_reqs = true,
+    args_conflicts_with_subcommands = true
+)]
 pub struct CliOptions {
-    #[arg(long)]
-    pub query: String,
+    #[command(subcommand)]
+    pub command: Option<Command>,
 
+    /// Query used to judge relevance.
+    #[arg(long, required = true)]
+    pub query: Option<String>,
+
+    /// Object field containing the text to score.
     #[arg(long, default_value = "text")]
     pub text_field: String,
 
+    /// Field prepended to the text as context. May be repeated.
     #[arg(long = "context-field")]
     pub context_fields: Vec<String>,
 
-    /// Select ranking, evidence filtering, or extractive compression.
+    /// rerank sorts by relevance, filter drops candidates without usable evidence, compress keeps
+    /// relevant sentences and lines.
     #[arg(long, default_value = "rerank")]
     pub mode: Mode,
 
-    /// Minimum evidence probability for filter/compress (default: 0.5).
+    /// Minimum score, from 0 to 1, to keep a candidate or sentence. Filter and compress only
+    /// (default: 0.5).
     #[arg(long)]
     pub threshold: Option<f64>,
 
+    /// Maximum number of objects to output.
     #[arg(long)]
     pub top: Option<usize>,
 
+    /// Jev model. Name a version such as jev-1.13.0 to keep scores stable across releases.
     #[arg(long, default_value = "jev-latest")]
     pub model: String,
 
-    #[arg(long, default_value_t = 30)]
+    // Hidden because users cannot pick a better value; kept so tests can force several batches.
+    #[arg(long, default_value_t = 30, hide = true)]
     pub batch_size: usize,
 
     /// Timeout for each HTTP attempt in milliseconds, not the whole run.
     #[arg(long, default_value_t = 10_000)]
     pub timeout_ms: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Subcommand)]
+pub enum Command {
+    /// Manage the agent skill that teaches coding assistants to use this CLI.
+    #[command(subcommand)]
+    Skills(crate::skills::SkillsCommand),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -57,7 +82,8 @@ pub struct ResolvedOptions {
 }
 
 pub fn resolve_options(raw: CliOptions) -> Result<ResolvedOptions, AppError> {
-    if raw.query.is_empty() {
+    let query = raw.query.unwrap_or_default();
+    if query.is_empty() {
         return Err(usage("query", "must not be empty"));
     }
     validate_name("text-field", &raw.text_field)?;
@@ -95,7 +121,7 @@ pub fn resolve_options(raw: CliOptions) -> Result<ResolvedOptions, AppError> {
     }
 
     Ok(ResolvedOptions {
-        query: raw.query,
+        query,
         text_field: raw.text_field,
         context_fields: raw.context_fields,
         mode: raw.mode,
