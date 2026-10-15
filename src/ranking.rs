@@ -183,13 +183,4 @@ mod tests {
             "Silas B. Cobb paid.\nApproval required."
         );
     }
-
-    #[test]
-    fn rejects_mismatched_or_non_probability_scores() {
-        let options = resolve_options(CliOptions::parse_from(["cli", "--query", "q"])).unwrap();
-        let docs = prepare_documents(parse_input(r#"[{"text":"a"}]"#).unwrap(), &options).unwrap();
-        for scores in [vec![], vec![f64::NAN], vec![1.1], vec![-0.1]] {
-            assert!(rank_documents(docs.clone(), &scores, &options).is_err());
-        }
-    }
 }

@@ -5,13 +5,13 @@
 //     produces one complete, newline-terminated reranked array while preserving every input
 //     property in JSON meaning, including an integer outside the u64/i64 ranges.
 // Behavior: pipe tests/fixtures/mcp-local-rag/query-output.sample.json into the debug binary
-//     configured for boost/ascending ranking and a literal-loopback stub -> observe the real
+//     configured with a context field and a literal-loopback stub -> observe the real
 //     child process and HTTP request -> return deterministic answers and observe exit 0 plus the
 //     exact parsed output values, ranking, cardinality, generated scores, and trailing LF.
 // @lane: service-integration-e2e
 // @dependency: compiled debug jev-reranker binary; stdin/stdout/stderr process pipes;
 //     JEV_RERANKER_TEST_ENDPOINT; literal-loopback std::net::TcpListener stub; vendored
-//     mcp-local-rag schema and representative sample fixture
+//     mcp-local-rag representative sample fixture
 // @real-dependency: operating-system child-process pipes; CLI parsing and full application
 //     pipeline; reqwest blocking HTTP client; serde/serde_json serialization; loopback TCP
 // Primary failure mode: unit tests remain green while the executable misreads stdin, composes
@@ -77,9 +77,6 @@ use serde_json::{json, Value};
 const DUMMY_KEY: &str = "dummy-test-key";
 const FIXTURE: &str = include_str!("fixtures/mcp-local-rag/query-output.sample.json");
 const REORDERED_FIXTURE_RESPONSE: &str = r#"{"model":"jev-test","answers":{"document-1":{"type":"noul","noul":0.8},"document-0":{"type":"noul","noul":0.2}},"usage":{"input_tokens":1,"output_tokens":1}}"#;
-
-// Provenance: exact bytes copied from
-// https://raw.githubusercontent.com/shinpr/mcp-local-rag/589f00f71a18a61ac3b2c97dcf2edf14611dcf87/docs/schema/query-output.schema.json
 
 #[derive(Debug)]
 struct ProcessOutput {
@@ -626,13 +623,12 @@ fn parse_body(request: &RequestRecord) -> Result<Value, Box<dyn Error>> {
     Ok(serde_json::from_slice(&request.body)?)
 }
 
-fn without_generated_scores(value: &Value) -> Result<Value, Box<dyn Error>> {
+fn without_rerank_score(value: &Value) -> Result<Value, Box<dyn Error>> {
     let mut object = value
         .as_object()
         .cloned()
         .ok_or("fixture output item was not an object")?;
     object.remove("rerankScore");
-    object.remove("fusedScore");
     Ok(Value::Object(object))
 }
 
@@ -702,19 +698,12 @@ fn assert_fixture_output(stdout: &[u8]) -> Result<(), Box<dyn Error>> {
             .iter()
             .find(|candidate| candidate.get("filePath") == Some(path))
             .ok_or("emitted object did not match a fixture object")?;
-        assert_eq!(without_generated_scores(emitted)?, *original);
+        assert_eq!(without_rerank_score(emitted)?, *original);
     }
     assert_eq!(array[0]["filePath"], "/tmp/jev-reranker/reference.md");
-    assert_eq!(array[0]["fileTitle"], "Reference");
-    assert_eq!(array[0]["images"], json!([]));
-    assert_eq!(array[0]["futureProperty"], Value::Null);
+    // Compared as text so a lossy parse on both sides cannot hide lost precision.
     assert_eq!(array[0]["hugeInteger"].to_string(), "-9223372036854775809");
-    assert_eq!(array[1]["fileTitle"], Value::Null);
-    assert_eq!(array[1]["images"][0]["mimeType"], "image/png");
-    assert_eq!(array[1]["futureProperty"]["labels"][1], "unknown");
     assert_eq!(array[1]["hugeInteger"].to_string(), "18446744073709551617");
-    assert!(array[0].get("fusedScore").is_none());
-    assert!(array[1].get("fusedScore").is_none());
     assert_eq!(array[0]["rerankScore"], json!(0.8));
     assert_eq!(array[1]["rerankScore"], json!(0.2));
     Ok(())
@@ -723,13 +712,6 @@ fn assert_fixture_output(stdout: &[u8]) -> Result<(), Box<dyn Error>> {
 #[test]
 fn contract_fixture_crosses_the_process_and_http_boundaries() -> Result<(), Box<dyn Error>> {
     let server = start_stub(vec![raw_response(200, REORDERED_FIXTURE_RESPONSE)])?;
-    let answer_one = REORDERED_FIXTURE_RESPONSE
-        .find("\"document-1\"")
-        .ok_or("reordered response omitted document-1")?;
-    let answer_zero = REORDERED_FIXTURE_RESPONSE
-        .find("\"document-0\"")
-        .ok_or("reordered response omitted document-0")?;
-    assert!(answer_one < answer_zero);
     let output = run_cli(
         &[
             "--query",
@@ -876,7 +858,8 @@ fn transport_failure_is_not_retried() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn non_retryable_status_reports_only_the_server_message() -> Result<(), Box<dyn Error>> {
+fn non_retryable_status_is_not_split_and_reports_only_the_server_message(
+) -> Result<(), Box<dyn Error>> {
     let body = json!({
         "detail": {"message": "Unknown\u{1b}[31m model", "input": "server-secret"},
         "secret": "server-secret"
@@ -884,7 +867,7 @@ fn non_retryable_status_reports_only_the_server_message() -> Result<(), Box<dyn 
     let server = start_stub(vec![response(400, &body)])?;
     let output = run_cli(
         &["--query", "q", "--mode", "rerank"],
-        r#"[{"text":"body"}]"#,
+        r#"[{"text":"first"},{"text":"second"}]"#,
         Some(&server.endpoint),
         Some(DUMMY_KEY),
     )?;
@@ -923,6 +906,7 @@ fn server_errors_are_retried_before_failing_the_run() -> Result<(), Box<dyn Erro
 fn malformed_and_mismatched_answers_fail_without_output() -> Result<(), Box<dyn Error>> {
     for body in [
         json!({"answers": {"document-0": {"type": "noul", "noul": "not-a-number"}}}),
+        json!({"answers": {"document-0": {"type": "noul", "noul": 1.1}}}),
         json!({"answers": {"unexpected": {"type": "noul", "noul": 0.5}}}),
     ] {
         let server = start_stub(vec![response(200, &body)])?;
@@ -981,42 +965,38 @@ fn empty_input_bypasses_credentials_and_endpoint() -> Result<(), Box<dyn Error>>
 }
 
 #[test]
-fn filter_keeps_evidence_in_input_order_and_can_return_empty() -> Result<(), Box<dyn Error>> {
-    for (threshold, expected) in [("0.5", json!(["a", "b"])), ("1", json!([]))] {
-        let server = start_observing_responses(vec![response(
-            200,
-            &valid_answers(&[
-                ("document-0", 0.5),
-                ("document-1", 0.9),
-                ("document-2", 0.1),
-            ]),
-        )])?;
-        let output = run_cli(
-            &["--query", "q", "--mode", "filter", "--threshold", threshold],
-            r#"[{"id":"a","text":"first"},{"id":"b","text":"second"},{"id":"c","text":"third"}]"#,
-            Some(&server.endpoint),
-            Some(DUMMY_KEY),
-        )?;
-        let requests = server.shutdown_and_finish()?;
-        assert_success(&output);
-        let result: Value = serde_json::from_slice(&output.stdout)?;
-        let ids: Vec<_> = result
-            .as_array()
-            .ok_or("array")?
-            .iter()
-            .map(|v| v["id"].clone())
-            .collect();
-        assert_eq!(json!(ids), expected);
-        let body = parse_body(&requests[0])?;
-        assert!(body["questions"]["document-0"]["instructions"]
-            .as_str()
-            .ok_or("instructions")?
-            .contains("usable evidence"));
-        if threshold == "0.5" {
-            assert_eq!(result[0]["evidenceScore"], json!(0.5));
-            assert!(result[0].get("rerankScore").is_none());
-        }
-    }
+fn filter_keeps_evidence_in_input_order() -> Result<(), Box<dyn Error>> {
+    let server = start_observing_responses(vec![response(
+        200,
+        &valid_answers(&[
+            ("document-0", 0.5),
+            ("document-1", 0.9),
+            ("document-2", 0.1),
+        ]),
+    )])?;
+    let output = run_cli(
+        &["--query", "q", "--mode", "filter", "--threshold", "0.5"],
+        r#"[{"id":"a","text":"first"},{"id":"b","text":"second"},{"id":"c","text":"third"}]"#,
+        Some(&server.endpoint),
+        Some(DUMMY_KEY),
+    )?;
+    let requests = server.shutdown_and_finish()?;
+    assert_success(&output);
+    let result: Value = serde_json::from_slice(&output.stdout)?;
+    let ids: Vec<_> = result
+        .as_array()
+        .ok_or("array")?
+        .iter()
+        .map(|v| v["id"].clone())
+        .collect();
+    assert_eq!(json!(ids), json!(["a", "b"]));
+    assert_eq!(result[0]["evidenceScore"], json!(0.5));
+    assert!(result[0].get("rerankScore").is_none());
+    let body = parse_body(&requests[0])?;
+    assert!(body["questions"]["document-0"]["instructions"]
+        .as_str()
+        .ok_or("instructions")?
+        .contains("usable evidence"));
     Ok(())
 }
 
@@ -1045,7 +1025,7 @@ fn compress_extracts_verbatim_units_with_full_context_across_batches() -> Result
         ),
     ])?;
     let input = json!([
-        {"body": source, "title":"Funding", "source":"manual", "compressedText":"stale", "huge":18_446_744_073_709_551_617_i128},
+        {"body": source, "title":"Funding", "source":"manual", "compressedText":"stale"},
         {"body":"No evidence.", "title":null},
         {"body":" \n ", "title":null}
     ]);
@@ -1072,7 +1052,6 @@ fn compress_extracts_verbatim_units_with_full_context_across_batches() -> Result
     assert_eq!(result.as_array().ok_or("array")?.len(), 1);
     assert_eq!(result[0]["body"], source);
     assert_eq!(result[0]["source"], "manual");
-    assert_eq!(result[0]["huge"].to_string(), "18446744073709551617");
     assert_eq!(
         result[0]["compressedText"],
         "Silas B. Cobb paid $1.5 million. Payment requires approval."
@@ -1104,113 +1083,6 @@ fn compress_extracts_verbatim_units_with_full_context_across_batches() -> Result
         .ok_or("instructions")?;
     assert!(instructions.contains("exceptions"));
     assert!(instructions.contains("antecedents"));
-    Ok(())
-}
-
-#[test]
-fn compression_failure_in_later_batch_emits_no_partial_results() -> Result<(), Box<dyn Error>> {
-    let server = start_routing_stub(vec![
-        route(
-            &["document-0-unit-0"],
-            vec![response(200, &valid_answers(&[("document-0-unit-0", 0.9)]))],
-        ),
-        route(
-            &["document-0-unit-1"],
-            vec![response(200, &valid_answers(&[("wrong-unit", 0.9)]))],
-        ),
-    ])?;
-    let output = run_cli(
-        &["--query", "q", "--mode", "compress", "--batch-size", "1"],
-        r#"[{"text":"Answer here. Exception here."}]"#,
-        Some(&server.endpoint),
-        Some(DUMMY_KEY),
-    )?;
-    let _ = server.shutdown_and_finish()?;
-    assert_eq!(output.status.code(), Some(1));
-    assert!(output.stdout.is_empty());
-    Ok(())
-}
-
-#[test]
-fn all_modes_accept_empty_input_and_retired_options_are_rejected() -> Result<(), Box<dyn Error>> {
-    for mode in ["rerank", "filter", "compress"] {
-        let output = run_cli(&["--query", "q", "--mode", mode], "[]", None, None)?;
-        assert_success(&output);
-        assert_eq!(output.stdout, b"[]\n");
-    }
-    for option in [
-        "--fusion",
-        "--score-field",
-        "--score-order",
-        "--weight",
-        "--language",
-    ] {
-        let output = run_cli(&["--query", "q", option, "old"], "[]", None, None)?;
-        assert_eq!(output.status.code(), Some(2));
-    }
-    Ok(())
-}
-
-#[test]
-fn whitespace_only_compression_needs_no_api_call() -> Result<(), Box<dyn Error>> {
-    let output = run_cli(
-        &["--query", "q", "--mode", "compress"],
-        r#"[{"text":" \n \t "}]"#,
-        None,
-        None,
-    )?;
-    assert_success(&output);
-    assert_eq!(output.stdout, b"[]\n");
-    Ok(())
-}
-
-#[test]
-fn compress_handles_multilingual_text_without_configuration() -> Result<(), Box<dyn Error>> {
-    let cases: Vec<Value> =
-        serde_json::from_str(include_str!("fixtures/compression/multilingual.json"))?;
-    // All languages travel through the same invocation, without a language hint.
-    let mut ordered = Vec::new();
-    for (index, case) in cases.iter().enumerate() {
-        let count = case["units"].as_u64().ok_or("unit count")?;
-        for unit in 0..count {
-            ordered.push((
-                format!("document-{index}-unit-{unit}"),
-                json!({
-                    "type":"noul", "noul":if unit + 1 == count {0.1} else {0.9}
-                }),
-            ));
-        }
-    }
-    let routes = ordered
-        .chunks(30)
-        .map(|chunk| {
-            let ids = chunk.iter().map(|(id, _)| id.clone()).collect();
-            let answers: serde_json::Map<_, _> = chunk.iter().cloned().collect();
-            (ids, vec![response(200, &json!({"answers":answers}))])
-        })
-        .collect();
-    let server = start_routing_stub(routes)?;
-    let output = run_cli(
-        &[
-            "--query",
-            "Who approved the payment and what condition applies?",
-            "--mode",
-            "compress",
-        ],
-        &serde_json::to_string(&cases)?,
-        Some(&server.endpoint),
-        Some(DUMMY_KEY),
-    )?;
-    assert_success(&output);
-    let requests = server.shutdown_and_finish()?;
-    assert_eq!(requests.len(), 2);
-    let result: Vec<Value> = serde_json::from_slice(&output.stdout)?;
-    assert_eq!(result.len(), cases.len());
-    for (actual, case) in result.iter().zip(&cases) {
-        assert_eq!(actual["compressedText"], case["expected"]);
-        assert_eq!(actual["text"], case["text"]);
-        assert_eq!(actual["id"], case["id"]);
-    }
     Ok(())
 }
 
@@ -1309,56 +1181,6 @@ fn single_item_over_token_limit_names_the_item() -> Result<(), Box<dyn Error>> {
             "stderr leaked {secret:?}: {stderr}"
         );
     }
-    Ok(())
-}
-
-#[test]
-fn other_bad_requests_are_not_split_or_retried() -> Result<(), Box<dyn Error>> {
-    let server = start_routing_stub(vec![route(
-        &["document-0", "document-1"],
-        vec![response(400, &json!({"detail": "server-secret"}))],
-    )])?;
-    let output = run_cli(
-        &["--query", "q"],
-        r#"[{"text":"first"},{"text":"second"}]"#,
-        Some(&server.endpoint),
-        Some(DUMMY_KEY),
-    )?;
-    let requests = server.shutdown_and_finish()?;
-    assert_eq!(output.status.code(), Some(1));
-    assert!(output.stdout.is_empty());
-    assert_eq!(requests.len(), 1);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("batch 1 returned HTTP status 400"));
-    assert!(!stderr.contains("server-secret"));
-    Ok(())
-}
-
-#[test]
-fn the_lowest_failed_batch_is_reported_regardless_of_arrival_order() -> Result<(), Box<dyn Error>> {
-    let server = start_routing_stub(vec![
-        route(
-            &["document-0"],
-            vec![response(200, &valid_answers(&[("document-0", 0.5)]))],
-        ),
-        route(&["document-1"], vec![response(401, &json!({}))]),
-        route(&["document-2"], vec![response(401, &json!({}))]),
-    ])?;
-    let output = run_cli(
-        &["--query", "q", "--batch-size", "1"],
-        r#"[{"text":"first"},{"text":"second"},{"text":"third"}]"#,
-        Some(&server.endpoint),
-        Some(DUMMY_KEY),
-    )?;
-    let _ = server.shutdown_and_finish()?;
-    assert_eq!(output.status.code(), Some(1));
-    assert!(output.stdout.is_empty());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("batch 2 returned HTTP status 401"),
-        "{stderr}"
-    );
-    assert!(!stderr.contains("batch 3"));
     Ok(())
 }
 

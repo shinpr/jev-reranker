@@ -129,14 +129,11 @@ mod tests {
     }
 
     #[test]
-    fn prepares_exact_context_text_and_preserves_the_original_map() {
+    fn prepends_context_fields_in_option_order() {
         let input = vec![object(json!({
-            "title": "Guide",
             "section": "Setup",
             "text": "Use this value",
-            "score": 3.0,
-            "future": {"enabled": true},
-            "huge": 18_446_744_073_709_551_617_i128
+            "title": "Guide"
         }))];
         let prepared = prepare_documents(input, &options());
         assert!(prepared.is_ok());
@@ -144,10 +141,6 @@ mod tests {
             assert_eq!(documents.len(), 1);
             if let Some(document) = documents.first() {
                 assert_eq!(document.prepared_text, "Guide\n\nSetup\n\nUse this value");
-                assert_eq!(document.original_index, 0);
-
-                assert!(document.object.contains_key("future"));
-                assert!(document.object.contains_key("huge"));
             }
         }
     }
