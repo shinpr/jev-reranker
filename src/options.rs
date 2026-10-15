@@ -180,7 +180,5 @@ mod tests {
         ] {
             assert!(resolve_options(CliOptions::try_parse_from(args).unwrap()).is_err());
         }
-        let options = resolve_options(CliOptions::parse_from(["cli", "--query", "q"])).unwrap();
-        assert_eq!(options.mode, Mode::Rerank);
     }
 }

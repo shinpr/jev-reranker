@@ -40,16 +40,16 @@ mod tests {
 
     #[test]
     fn recognizes_sentence_terminators_without_language_selection() {
-        for (text, expected) in [
-            ("First. Second.", vec!["First. ", "Second."]),
-            (
-                "保存三十天。特殊情况除外。",
-                vec!["保存三十天。", "特殊情况除外。"],
-            ),
-            ("هل تم الحفظ؟ نعم.", vec!["هل تم الحفظ؟ ", "نعم."]),
-            ("डेटा सुरक्षित है। आगे बढ़ें।", vec!["डेटा सुरक्षित है। ", "आगे बढ़ें।"]),
-        ] {
-            assert_eq!(split_units(text), expected);
+        let cases: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+            "../tests/fixtures/compression/multilingual.json"
+        ))
+        .unwrap();
+        // Each case ends with one unrelated sentence; the units before it form the expected text.
+        for case in &cases {
+            let units = split_units(case["text"].as_str().unwrap());
+            assert_eq!(case["units"], units.len(), "{}", case["id"]);
+            let (_, kept) = units.split_last().unwrap();
+            assert_eq!(case["expected"], kept.concat().trim(), "{}", case["id"]);
         }
     }
 }
