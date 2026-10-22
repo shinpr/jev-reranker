@@ -6,9 +6,9 @@ multiple-versions = "deny"
 wildcards = "deny"
 highlight = "all"
 skip = [
-  # reqwest's rustls ring stack and clap's current terminal stack require
-  # incompatible windows-sys major versions.
-  { name = "windows-sys", version = "0.52.0" },
+  # rustls-platform-verifier's Android JNI macros require syn 2 while the
+  # remaining derive macros use syn 3.
+  { name = "syn", version = "=2.0.119" },
 ]
 
 [licenses]
@@ -21,6 +21,10 @@ allow = [
   "ISC",
   "MIT",
   "Unicode-3.0",
+]
+exceptions = [
+  # serde_json's preserve_order feature requires this Zlib-licensed crate.
+  { name = "foldhash", version = "=0.2.0", allow = ["Zlib"] },
 ]
 
 [sources]
