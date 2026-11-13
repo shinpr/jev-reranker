@@ -1,11 +1,10 @@
 [package]
 name = "jev-reranker"
-version = "0.1.7"
+version = "0.1.8"
 edition = "2021"
 publish = false
 description = "Rerank JSON search results with TypeSafe AI's Jev"
 repository = "https://github.com/shinpr/jev-reranker"
-homepage = "https://github.com/shinpr/jev-reranker"
 readme = "README.md"
 license = "MIT"
 keywords = ["search", "reranking", "cli", "jev", "json"]

@@ -159,9 +159,10 @@ mod tests {
             let result = rank_documents(docs.clone(), &[0.1, 0.5, 0.9], &options).unwrap();
             assert_eq!(result.len(), 1);
             assert_eq!(result[0]["text"], "first evidence");
-            assert!(rank_documents(docs, &[0.1, 0.2, 0.3], &options)
-                .unwrap()
-                .is_empty());
+            assert_eq!(
+                rank_documents(docs, &[0.1, 0.2, 0.3], &options).unwrap(),
+                Vec::<Map<String, Value>>::new()
+            );
         }
     }
 

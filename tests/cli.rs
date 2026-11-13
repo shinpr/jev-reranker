@@ -246,8 +246,7 @@ fn serve_routes(
             serde_json::from_slice(&request.body).map_err(|error| error.to_string())?;
         let ids = body["questions"]
             .as_object()
-            .map(|questions| questions.keys().cloned().collect::<Vec<_>>())
-            .unwrap_or_default();
+            .map_or_default(|questions| questions.keys().cloned().collect::<Vec<_>>());
         requests.push(request);
         let Some(script) = routes.get_mut(&ids).and_then(VecDeque::pop_front) else {
             let _ = write_response(&mut stream, &raw_response(500, "{}"));
@@ -313,8 +312,7 @@ fn serve_overlap(
             serde_json::from_slice(&request.body).map_err(|error| error.to_string())?;
         let mut ids = body["questions"]
             .as_object()
-            .map(|questions| questions.keys().cloned().collect::<Vec<_>>())
-            .unwrap_or_default();
+            .map_or_default(|questions| questions.keys().cloned().collect::<Vec<_>>());
         ids.sort();
         let script = routes
             .get(&ids)
@@ -646,7 +644,7 @@ fn assert_success(output: &ProcessOutput) {
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(output.stderr.is_empty());
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
 }
 
 fn assert_fixture_request(request: &RequestRecord) -> Result<(), Box<dyn Error>> {
@@ -751,7 +749,7 @@ fn redirect_is_not_followed_and_keeps_sensitive_content_out_of_errors() -> Resul
     let request = requests.first().ok_or("request was not captured")?;
     assert_eq!(request.request_line, "POST /v1/systemone HTTP/1.1");
     assert_eq!(output.status.code(), Some(1));
-    assert!(output.stdout.is_empty());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("307"));
     for secret in [
@@ -793,7 +791,7 @@ fn later_batch_retry_exhaustion_is_bounded_and_output_atomic() -> Result<(), Box
     let requests = server.shutdown_and_finish()?;
     assert!(!output.status.success());
     assert_eq!(output.status.code(), Some(1));
-    assert!(output.stdout.is_empty());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
     assert_eq!(requests.len(), 4);
     let bodies = requests
         .iter()
@@ -834,7 +832,7 @@ fn timeout_is_not_retried_and_keeps_stdout_empty() -> Result<(), Box<dyn Error>>
     )?;
     let requests = server.shutdown_and_finish()?;
     assert_eq!(output.status.code(), Some(1));
-    assert!(output.stdout.is_empty());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
     assert_eq!(requests.len(), 1);
     assert!(String::from_utf8_lossy(&output.stderr).contains("timed out"));
     Ok(())
@@ -851,7 +849,7 @@ fn transport_failure_is_not_retried() -> Result<(), Box<dyn Error>> {
     )?;
     let requests = server.shutdown_and_finish()?;
     assert_eq!(output.status.code(), Some(1));
-    assert!(output.stdout.is_empty());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
     assert_eq!(requests.len(), 1);
     assert!(String::from_utf8_lossy(&output.stderr).contains("transport"));
     Ok(())
@@ -874,7 +872,7 @@ fn non_retryable_status_is_not_split_and_reports_only_the_server_message(
     let requests = server.finish()?;
     assert_eq!(requests.len(), 1);
     assert_eq!(output.status.code(), Some(1));
-    assert!(output.stdout.is_empty());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("HTTP status 400: Unknown [31m model"));
     assert!(!stderr.contains('\u{1b}'));
@@ -918,7 +916,7 @@ fn malformed_and_mismatched_answers_fail_without_output() -> Result<(), Box<dyn 
         )?;
         let _ = server.finish()?;
         assert_eq!(output.status.code(), Some(1));
-        assert!(output.stdout.is_empty());
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "");
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains("answer") || stderr.contains("response"));
         assert!(!stderr.contains("not-a-number"));
@@ -931,7 +929,7 @@ fn malformed_and_mismatched_answers_fail_without_output() -> Result<(), Box<dyn 
 fn invalid_cli_usage_exits_two_without_stdout() -> Result<(), Box<dyn Error>> {
     let output = run_cli(&[], "[]", None, None)?;
     assert_eq!(output.status.code(), Some(2));
-    assert!(output.stdout.is_empty());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
     assert!(String::from_utf8_lossy(&output.stderr).contains("--query"));
     Ok(())
 }
@@ -945,7 +943,7 @@ fn runtime_failure_exits_one_without_stdout() -> Result<(), Box<dyn Error>> {
         None,
     )?;
     assert_eq!(output.status.code(), Some(1));
-    assert!(output.stdout.is_empty());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
     assert!(String::from_utf8_lossy(&output.stderr).contains("TYPESAFE_API_KEY"));
     Ok(())
 }
@@ -960,7 +958,7 @@ fn empty_input_bypasses_credentials_and_endpoint() -> Result<(), Box<dyn Error>>
     )?;
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(output.stdout, b"[]\n");
-    assert!(output.stderr.is_empty());
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
     Ok(())
 }
 
@@ -1159,7 +1157,7 @@ fn single_item_over_token_limit_names_the_item() -> Result<(), Box<dyn Error>> {
     )?;
     let requests = server.shutdown_and_finish()?;
     assert_eq!(output.status.code(), Some(1));
-    assert!(output.stdout.is_empty());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
     assert_eq!(
         requests
             .iter()
