@@ -35,7 +35,7 @@ mod tests {
             assert_eq!(units.concat(), text.trim());
             assert!(units.iter().all(|unit| !unit.trim().is_empty()));
         }
-        assert!(split_units(" \r\n ").is_empty());
+        assert_eq!(split_units(" \r\n "), Vec::<String>::new());
     }
 
     #[test]
