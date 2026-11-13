@@ -1,0 +1,31 @@
+name: Advisories
+
+# Catch RustSec advisories against Cargo.lock even when nothing is pushed.
+on:
+  schedule:
+    # Mondays 00:17 UTC (09:17 JST); off the hour to avoid scheduler congestion.
+    - cron: "17 0 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cargo-deny-advisories:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install pinned Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
+        with:
+          toolchain: 1.100.0
+
+      - name: Install pinned cargo-deny
+        run: cargo +1.100.0 install --locked cargo-deny --version 0.20.2
+
+      - name: Check advisories
+        run: cargo deny check advisories
